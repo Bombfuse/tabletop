@@ -1,5 +1,5 @@
 use anyhow::Result;
-use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, horizontal_rule, row, text, text_input};
 use iced::{Element, Length};
 
 use crate::gui::{LevelRow, Message, ToolsGui};
@@ -33,11 +33,7 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         let preview = preview_text(&lv.text);
 
         let row_el = row![
-            column![
-                text(lv.name.clone()).size(16),
-                text(preview).size(12),
-            ]
-            .spacing(2),
+            column![text(lv.name.clone()).size(16), text(preview).size(12),].spacing(2),
             iced::widget::Space::with_width(Length::Fill),
             button("Edit").on_press(Message::EditLevel(lv.name.clone())),
             button("Delete").on_press(Message::DeleteLevel(lv.name.clone())),
@@ -47,9 +43,7 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         list_col = list_col.push(container(row_el).padding(8));
     }
 
-    let list = scrollable(list_col).height(Length::Fill);
-
-    column![form, horizontal_rule(1), list]
+    column![form, horizontal_rule(1), list_col]
         .spacing(12)
         .height(Length::Fill)
         .into()

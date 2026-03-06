@@ -1,5 +1,5 @@
 use anyhow::Result;
-use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, horizontal_rule, row, text, text_input};
 use iced::{Element, Length};
 
 use crate::gui::{Message, ToolsGui, UnitRow};
@@ -61,9 +61,7 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         list_col = list_col.push(container(row_el).padding(8));
     }
 
-    let list = scrollable(list_col).height(Length::Fill);
-
-    column![form, horizontal_rule(1), list]
+    column![form, horizontal_rule(1), list_col]
         .spacing(12)
         .height(Length::Fill)
         .into()

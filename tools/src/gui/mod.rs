@@ -25,6 +25,7 @@ pub enum Tab {
     Units,
     Items,
     Levels,
+    Actions,
 }
 
 impl Tab {
@@ -33,6 +34,7 @@ impl Tab {
             Tab::Units => "Units",
             Tab::Items => "Items",
             Tab::Levels => "Levels",
+            Tab::Actions => "Actions",
         }
     }
 }
@@ -43,6 +45,7 @@ pub enum ActiveView {
     EditUnit { original_name: String },
     EditItem { original_name: String },
     EditLevel { original_name: String },
+    EditAction { original_name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -70,21 +73,47 @@ pub enum Message {
     LevelTextChanged(String),
     CreateLevel,
 
+    // Actions form
+    ActionNameChanged(String),
+    ActionPointCostChanged(String),
+    ActionTypeChanged(String),
+    ActionTextChanged(String),
+    CreateAction,
+
+    // Attack subform (for action edit view)
+    AttackDamageChanged(String),
+    AttackDamageTypeChanged(String),
+    AttackSkillChanged(String),
+    AttackTargetChanged(String),
+    AttackRangeChanged(String),
+    SaveAttackEdits,
+    DeleteAttack,
+
+    // Interaction subform (for action edit view)
+    InteractionRangeChanged(String),
+    InteractionSkillChanged(String),
+    InteractionTargetChanged(String), // empty string => NULL
+    SaveInteractionEdits,
+    DeleteInteraction,
+
     // Edit navigation
     EditUnit(String),
     EditItem(String),
     EditLevel(String),
+    EditAction(String),
     CancelEdit,
 
     // Save edits
     SaveUnitEdits,
     SaveItemEdits,
     SaveLevelEdits,
+    SaveActionEdits,
 
     // Delete actions
     DeleteUnit(String),
     DeleteItem(String),
     DeleteLevel(String),
+    DeleteAction(String),
 
     // Status
     ClearStatus,
@@ -111,6 +140,14 @@ pub struct LevelRow {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionRow {
+    pub name: String,
+    pub action_point_cost: i64,
+    pub action_type: String,
+    pub text: String,
+}
+
 pub struct ToolsGui {
     pub tab: Tab,
 
@@ -133,10 +170,29 @@ pub struct ToolsGui {
     pub level_name: String,
     pub level_text: String,
 
+    // Actions form / edit buffer
+    pub action_name: String,
+    pub action_point_cost: String,
+    pub action_type: String,
+    pub action_text: String,
+
+    // Attack subform buffer (for action edit view)
+    pub attack_damage: String,
+    pub attack_damage_type: String,
+    pub attack_skill: String,
+    pub attack_target: String,
+    pub attack_range: String,
+
+    // Interaction subform buffer (for action edit view)
+    pub interaction_range: String,
+    pub interaction_skill: String,
+    pub interaction_target: String,
+
     // loaded data
     pub units: Vec<UnitRow>,
     pub items: Vec<ItemRow>,
     pub levels: Vec<LevelRow>,
+    pub actions: Vec<ActionRow>,
 
     // ui state
     pub status: Option<String>,
@@ -172,9 +228,25 @@ impl Default for ToolsGui {
             level_name: String::new(),
             level_text: String::new(),
 
+            action_name: String::new(),
+            action_point_cost: "0".to_string(),
+            action_type: "Interaction".to_string(),
+            action_text: String::new(),
+
+            attack_damage: "0".to_string(),
+            attack_damage_type: "Physical".to_string(),
+            attack_skill: "Strength".to_string(),
+            attack_target: "1".to_string(),
+            attack_range: "0".to_string(),
+
+            interaction_range: "0".to_string(),
+            interaction_skill: "Strength".to_string(),
+            interaction_target: "".to_string(),
+
             units: vec![],
             items: vec![],
             levels: vec![],
+            actions: vec![],
 
             status: None,
             active_view: ActiveView::List,
@@ -299,6 +371,101 @@ impl Application for ToolsGui {
                 Command::perform(async {}, |_| Message::Refresh)
             }
 
+            Message::ActionNameChanged(v) => {
+                self.action_name = v;
+                Command::none()
+            }
+            Message::ActionPointCostChanged(v) => {
+                self.action_point_cost = v;
+                Command::none()
+            }
+            Message::ActionTypeChanged(v) => {
+                self.action_type = v;
+                Command::none()
+            }
+            Message::ActionTextChanged(v) => {
+                self.action_text = v;
+                Command::none()
+            }
+            Message::CreateAction => {
+                if let Err(e) = self.create_action_from_form() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Action created".to_string());
+                    self.action_name.clear();
+                    self.action_text.clear();
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
+            Message::AttackDamageChanged(v) => {
+                self.attack_damage = v;
+                Command::none()
+            }
+            Message::AttackDamageTypeChanged(v) => {
+                self.attack_damage_type = v;
+                Command::none()
+            }
+            Message::AttackSkillChanged(v) => {
+                self.attack_skill = v;
+                Command::none()
+            }
+            Message::AttackTargetChanged(v) => {
+                self.attack_target = v;
+                Command::none()
+            }
+            Message::AttackRangeChanged(v) => {
+                self.attack_range = v;
+                Command::none()
+            }
+            Message::SaveAttackEdits => {
+                if let Err(e) = self.save_attack_edits() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Attack saved".to_string());
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+            Message::DeleteAttack => {
+                if let Err(e) = self.delete_attack_for_current_action() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Attack deleted".to_string());
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
+            Message::InteractionRangeChanged(v) => {
+                self.interaction_range = v;
+                Command::none()
+            }
+            Message::InteractionSkillChanged(v) => {
+                self.interaction_skill = v;
+                Command::none()
+            }
+            Message::InteractionTargetChanged(v) => {
+                self.interaction_target = v;
+                Command::none()
+            }
+            Message::SaveInteractionEdits => {
+                if let Err(e) = self.save_interaction_edits() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Interaction saved".to_string());
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+            Message::DeleteInteraction => {
+                if let Err(e) = self.delete_interaction_for_current_action() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Interaction deleted".to_string());
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
             Message::EditUnit(name) => {
                 if let Err(e) = self.begin_edit_unit(&name) {
                     self.status = Some(format!("{e:#}"));
@@ -315,6 +482,13 @@ impl Application for ToolsGui {
 
             Message::EditLevel(name) => {
                 if let Err(e) = self.begin_edit_level(&name) {
+                    self.status = Some(format!("{e:#}"));
+                }
+                Command::none()
+            }
+
+            Message::EditAction(name) => {
+                if let Err(e) = self.begin_edit_action(&name) {
                     self.status = Some(format!("{e:#}"));
                 }
                 Command::none()
@@ -358,6 +532,17 @@ impl Application for ToolsGui {
                 }
             }
 
+            Message::SaveActionEdits => {
+                if let Err(e) = self.save_action_edits() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Action updated".to_string());
+                    self.active_view = ActiveView::List;
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+
             Message::DeleteUnit(name) => {
                 if let Err(e) = self.delete_unit(&name) {
                     self.status = Some(format!("{e:#}"));
@@ -385,6 +570,15 @@ impl Application for ToolsGui {
                 Command::perform(async {}, |_| Message::Refresh)
             }
 
+            Message::DeleteAction(name) => {
+                if let Err(e) = self.delete_action(&name) {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some(format!("Deleted action `{name}`"));
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
             Message::ClearStatus => {
                 self.status = None;
                 Command::none()
@@ -404,6 +598,7 @@ impl Application for ToolsGui {
             views::tab_button(self.tab, Tab::Units),
             views::tab_button(self.tab, Tab::Items),
             views::tab_button(self.tab, Tab::Levels),
+            views::tab_button(self.tab, Tab::Actions),
             iced::widget::Space::with_width(Length::Fill),
         ]
         .spacing(8);
@@ -432,6 +627,13 @@ impl Application for ToolsGui {
                 }
                 _ => views::levels::view(self),
             },
+            Tab::Actions => match &self.active_view {
+                ActiveView::List => views::actions::view(self),
+                ActiveView::EditAction { original_name } => {
+                    views::actions::edit_view(self, original_name)
+                }
+                _ => views::actions::view(self),
+            },
         };
 
         container(
@@ -441,7 +643,7 @@ impl Application for ToolsGui {
                 horizontal_rule(1),
                 status,
                 horizontal_rule(1),
-                content
+                iced::widget::scrollable(content).height(Length::Fill),
             ]
             .spacing(12),
         )
@@ -517,6 +719,7 @@ impl ToolsGui {
         self.units = views::units::list_units(&conn)?;
         self.items = views::items::list_items(&conn)?;
         self.levels = views::levels::list_levels(&conn)?;
+        self.actions = views::actions::list_actions(&conn)?;
 
         Ok(())
     }
@@ -569,6 +772,29 @@ impl ToolsGui {
         Ok(())
     }
 
+    fn create_action_from_form(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+        let action_point_cost =
+            Self::parse_i64_field("Action Point Cost", &self.action_point_cost)?;
+        let action_type = match self.action_type.trim() {
+            "Interaction" => app::cards::action::ActionType::Interaction,
+            "Attack" => app::cards::action::ActionType::Attack,
+            other => {
+                anyhow::bail!("Action Type must be `Interaction` or `Attack` (got `{other}`)",)
+            }
+        };
+
+        let action = app::cards::action::Action {
+            name: self.action_name.trim().to_string(),
+            action_point_cost,
+            action_type,
+            text: self.action_text.trim().to_string(),
+        };
+
+        app::cards::action::save_card(&conn, &action)?;
+        Ok(())
+    }
+
     fn delete_unit(&self, name: &str) -> Result<()> {
         let conn = self.open_conn()?;
         let _ = app::cards::unit::delete_card(&conn, name)?;
@@ -584,6 +810,12 @@ impl ToolsGui {
     fn delete_level(&self, name: &str) -> Result<()> {
         let conn = self.open_conn()?;
         let _ = app::cards::level::delete_card(&conn, name)?;
+        Ok(())
+    }
+
+    fn delete_action(&self, name: &str) -> Result<()> {
+        let conn = self.open_conn()?;
+        let _ = app::cards::action::delete_card(&conn, name)?;
         Ok(())
     }
 
@@ -628,6 +860,59 @@ impl ToolsGui {
 
         self.active_view = ActiveView::EditLevel {
             original_name: lv.name,
+        };
+        Ok(())
+    }
+
+    fn begin_edit_action(&mut self, name: &str) -> Result<()> {
+        let conn = self.open_conn()?;
+        let a = app::cards::action::get_card(&conn, name)?
+            .with_context(|| format!("Action `{name}` not found"))?;
+
+        self.action_name = a.name.clone();
+        self.action_point_cost = a.action_point_cost.to_string();
+        self.action_type = match a.action_type {
+            app::cards::action::ActionType::Interaction => "Interaction".to_string(),
+            app::cards::action::ActionType::Attack => "Attack".to_string(),
+        };
+        self.action_text = a.text.clone();
+
+        // Pre-fill subforms from existing attack/interaction rows (if any).
+        if let Some(atk) = app::cards::attack::get_card(&conn, &a.name)? {
+            self.attack_damage = atk.damage.to_string();
+            self.attack_damage_type = match atk.damage_type {
+                app::cards::attack::DamageType::Arcane => "Arcane".to_string(),
+                app::cards::attack::DamageType::Physical => "Physical".to_string(),
+            };
+            self.attack_skill = match atk.skill {
+                app::cards::attack::Skill::Strength => "Strength".to_string(),
+                app::cards::attack::Skill::Focus => "Focus".to_string(),
+                app::cards::attack::Skill::Intelligence => "Intelligence".to_string(),
+                app::cards::attack::Skill::Knowledge => "Knowledge".to_string(),
+                app::cards::attack::Skill::Agility => "Agility".to_string(),
+            };
+            self.attack_target = atk.target.to_string();
+            self.attack_range = atk.range.to_string();
+        } else {
+            // Keep defaults / whatever is already in the buffer.
+        }
+
+        if let Some(ix) = app::cards::interaction::get_card(&conn, &a.name)? {
+            self.interaction_range = ix.range.to_string();
+            self.interaction_skill = match ix.skill {
+                app::cards::interaction::Skill::Strength => "Strength".to_string(),
+                app::cards::interaction::Skill::Focus => "Focus".to_string(),
+                app::cards::interaction::Skill::Intelligence => "Intelligence".to_string(),
+                app::cards::interaction::Skill::Knowledge => "Knowledge".to_string(),
+                app::cards::interaction::Skill::Agility => "Agility".to_string(),
+            };
+            self.interaction_target = ix.target.map(|t| t.to_string()).unwrap_or_default();
+        } else {
+            // Keep defaults / whatever is already in the buffer.
+        }
+
+        self.active_view = ActiveView::EditAction {
+            original_name: a.name,
         };
         Ok(())
     }
@@ -707,6 +992,158 @@ impl ToolsGui {
             .with_context(|| format!("Level `{}` does not exist", original_name))?;
         let _ = updated;
 
+        Ok(())
+    }
+
+    fn save_action_edits(&self) -> Result<()> {
+        let ActiveView::EditAction { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing an action");
+        };
+
+        let conn = self.open_conn()?;
+
+        let new_name = self.action_name.trim().to_string();
+        if new_name.is_empty() {
+            anyhow::bail!("Action.name must be non-empty");
+        }
+
+        let action_point_cost =
+            Self::parse_i64_field("Action Point Cost", &self.action_point_cost)?;
+        let action_type = match self.action_type.trim() {
+            "Interaction" => app::cards::action::ActionType::Interaction,
+            "Attack" => app::cards::action::ActionType::Attack,
+            other => {
+                anyhow::bail!("Action Type must be `Interaction` or `Attack` (got `{other}`)",)
+            }
+        };
+
+        let text = self.action_text.trim().to_string();
+        if text.is_empty() {
+            anyhow::bail!("Action.text must be non-empty");
+        }
+
+        let action = app::cards::action::Action {
+            name: new_name,
+            action_point_cost,
+            action_type,
+            text,
+        };
+
+        let updated = app::cards::action::rename_and_update_card(&conn, original_name, &action)?
+            .with_context(|| format!("Action `{}` does not exist", original_name))?;
+        let _ = updated;
+
+        Ok(())
+    }
+
+    fn parse_optional_i64_field(label: &str, s: &str) -> Result<Option<i64>> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let v: i64 = trimmed
+            .parse()
+            .with_context(|| format!("{label} must be an integer"))?;
+        Ok(Some(v))
+    }
+
+    fn current_action_name_for_subforms(&self) -> Result<&str> {
+        let ActiveView::EditAction { original_name: _ } = &self.active_view else {
+            anyhow::bail!("Attack/Interaction edits are only available while editing an action");
+        };
+        let name = self.action_name.trim();
+        if name.is_empty() {
+            anyhow::bail!("Action.name must be non-empty to edit Attack/Interaction");
+        }
+        Ok(name)
+    }
+
+    fn save_attack_edits(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+        let action_name = self.current_action_name_for_subforms()?.to_string();
+
+        let damage = Self::parse_i64_field("Damage", &self.attack_damage)?;
+        let range = Self::parse_i64_field("Range", &self.attack_range)?;
+        let target = Self::parse_i64_field("Target", &self.attack_target)?;
+
+        let damage_type = match self.attack_damage_type.trim() {
+            "Arcane" => app::cards::attack::DamageType::Arcane,
+            "Physical" => app::cards::attack::DamageType::Physical,
+            other => anyhow::bail!("Damage Type must be `Arcane` or `Physical` (got `{other}`)"),
+        };
+
+        let skill = match self.attack_skill.trim() {
+            "Strength" => app::cards::attack::Skill::Strength,
+            "Focus" => app::cards::attack::Skill::Focus,
+            "Intelligence" => app::cards::attack::Skill::Intelligence,
+            "Knowledge" => app::cards::attack::Skill::Knowledge,
+            "Agility" => app::cards::attack::Skill::Agility,
+            other => anyhow::bail!(
+                "Skill must be Strength/Focus/Intelligence/Knowledge/Agility (got `{other}`)"
+            ),
+        };
+
+        let atk = app::cards::attack::Attack {
+            action_name,
+            damage,
+            damage_type,
+            skill,
+            target,
+            range,
+        };
+
+        // Upsert: update if exists, otherwise create.
+        if app::cards::attack::update_card(&conn, &atk)?.is_none() {
+            let _ = app::cards::attack::save_card(&conn, &atk)?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_attack_for_current_action(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+        let action_name = self.current_action_name_for_subforms()?;
+        let _ = app::cards::attack::delete_card(&conn, action_name)?;
+        Ok(())
+    }
+
+    fn save_interaction_edits(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+        let action_name = self.current_action_name_for_subforms()?.to_string();
+
+        let range = Self::parse_i64_field("Range", &self.interaction_range)?;
+        let target = Self::parse_optional_i64_field("Target", &self.interaction_target)?;
+
+        let skill = match self.interaction_skill.trim() {
+            "Strength" => app::cards::interaction::Skill::Strength,
+            "Focus" => app::cards::interaction::Skill::Focus,
+            "Intelligence" => app::cards::interaction::Skill::Intelligence,
+            "Knowledge" => app::cards::interaction::Skill::Knowledge,
+            "Agility" => app::cards::interaction::Skill::Agility,
+            other => anyhow::bail!(
+                "Skill must be Strength/Focus/Intelligence/Knowledge/Agility (got `{other}`)"
+            ),
+        };
+
+        let ix = app::cards::interaction::Interaction {
+            action_name,
+            range,
+            skill,
+            target,
+        };
+
+        // Upsert: update if exists, otherwise create.
+        if app::cards::interaction::update_card(&conn, &ix)?.is_none() {
+            let _ = app::cards::interaction::save_card(&conn, &ix)?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_interaction_for_current_action(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+        let action_name = self.current_action_name_for_subforms()?;
+        let _ = app::cards::interaction::delete_card(&conn, action_name)?;
         Ok(())
     }
 }
