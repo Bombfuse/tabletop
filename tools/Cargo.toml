@@ -3,7 +3,25 @@ name = "tools"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["gui"]
+
+# GUI app (default)
+gui = ["dep:iced", "dep:tokio"]
+
+# Keep CLI optional (not default)
+cli = ["dep:clap"]
+
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+
+# CLI
+clap = { version = "4", features = ["derive"], optional = true }
+
+# GUI
+iced = { version = "0.12", features = ["tokio"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+
+[profile.release]
+lto = true
