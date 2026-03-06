@@ -1,0 +1,462 @@
+use iced::mouse;
+use iced::widget::canvas::{self, Cache, Canvas, Event, Geometry, Path, Program, Stroke};
+use iced::widget::{button, column, container, horizontal_rule, row, text, text_input};
+use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Theme};
+
+use crate::gui::{Message, ToolsGui};
+
+/// Hex grid editor view with true pointy-top hexagon rendering.
+///
+/// Coordinate model:
+/// - Uses (x,y) integer coordinates where x in [0..width) and y in [0..height).
+/// - Rendered as pointy-top hexes using an "odd-r" offset layout (odd rows shifted right).
+///
+/// Persistence:
+/// - This view is UI-only; it edits fields on `ToolsGui` and sends `Message`s.
+/// - DB save/load can be added by handling additional messages in `ToolsGui::update`.
+pub fn view(gui: &ToolsGui) -> Element<'_, Message> {
+    let header = column![
+        text("Hex Grid Editor").size(22),
+        text("Pointy-top hexes. Click a tile to edit its JSON payload.").size(14),
+    ]
+    .spacing(6);
+
+    let controls = row![
+        column![
+            text("Width").size(14),
+            text_input("9", &gui.hex_grid_width)
+                .on_input(Message::HexGridWidthChanged)
+                .padding(8),
+        ]
+        .spacing(6)
+        .width(Length::Fixed(140.0)),
+        column![
+            text("Height").size(14),
+            text_input("9", &gui.hex_grid_height)
+                .on_input(Message::HexGridHeightChanged)
+                .padding(8),
+        ]
+        .spacing(6)
+        .width(Length::Fixed(140.0)),
+        button("Apply resize").on_press(Message::HexGridApplyResize),
+        iced::widget::Space::with_width(Length::Fill),
+    ]
+    .spacing(12)
+    .align_items(Alignment::End);
+
+    let grid = hex_grid_canvas(gui);
+    let editor = selected_tile_editor(gui);
+
+    column![
+        header,
+        horizontal_rule(1),
+        controls,
+        row![grid, editor].spacing(16).height(Length::Fill),
+    ]
+    .spacing(12)
+    .into()
+}
+
+fn parse_dim(s: &str) -> Option<i32> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    t.parse::<i32>().ok().filter(|v| *v > 0)
+}
+
+fn hex_grid_canvas(gui: &ToolsGui) -> Element<'_, Message> {
+    let Some(w) = parse_dim(&gui.hex_grid_width) else {
+        return container(text("Enter a valid width (> 0)."))
+            .padding(12)
+            .into();
+    };
+    let Some(h) = parse_dim(&gui.hex_grid_height) else {
+        return container(text("Enter a valid height (> 0)."))
+            .padding(12)
+            .into();
+    };
+
+    // A reasonable default tile size for 9x9 while keeping UI usable.
+    // The canvas itself will scroll via the surrounding scrollable in the app.
+    let radius = 16.0_f32;
+    let padding = 14.0_f32;
+
+    // Compute a conservative canvas *height* so you can scroll vertically.
+    // For width, prefer responsive Fill to avoid a horizontal scrollbar in the main scrollable.
+    // Pointy-top hex:
+    // - hex width = sqrt(3) * r
+    // - hex height = 2r
+    // - vertical step between rows = 1.5r
+    // - horizontal step between cols = sqrt(3) * r
+    let _hex_w = (3.0_f32).sqrt() * radius;
+    let hex_h = 2.0_f32 * radius;
+    let step_y = 1.5_f32 * radius;
+
+    // odd-r layout shifts odd rows by half a column
+    let total_h = padding * 2.0 + (h as f32 - 1.0) * step_y + hex_h;
+
+    let program = HexGridProgram::new(
+        w,
+        h,
+        radius,
+        padding,
+        gui.hex_grid_selected_x,
+        gui.hex_grid_selected_y,
+        &gui.hex_grid_tile_json_by_xy,
+    );
+
+    container(
+        Canvas::new(program)
+            .width(Length::Fill)
+            .height(Length::Fixed(total_h.max(260.0))),
+    )
+    .padding(6)
+    .width(Length::FillPortion(2))
+    .height(Length::Fill)
+    .into()
+}
+
+fn selected_tile_editor(gui: &ToolsGui) -> Element<'_, Message> {
+    let title = text("Tile JSON").size(18);
+
+    let Some(x) = gui.hex_grid_selected_x else {
+        return container(
+            column![
+                title,
+                horizontal_rule(1),
+                text("Click a hex tile to edit its JSON.").size(14),
+            ]
+            .spacing(10),
+        )
+        .padding(12)
+        .width(Length::FillPortion(1))
+        .into();
+    };
+    let Some(y) = gui.hex_grid_selected_y else {
+        return container(
+            column![
+                title,
+                horizontal_rule(1),
+                text("Click a hex tile to edit its JSON.").size(14),
+            ]
+            .spacing(10),
+        )
+        .padding(12)
+        .width(Length::FillPortion(1))
+        .into();
+    };
+
+    let existing = gui
+        .hex_grid_tile_json_by_xy
+        .get(&(x, y))
+        .map(|s| s.as_str())
+        .unwrap_or("{}");
+
+    let kv_form = column![
+        text(format!("Selected: ({x},{y})")).size(14),
+        text("Existing JSON:").size(14),
+        container(text(existing).size(13))
+            .padding(8)
+            .width(Length::Fill)
+            .style(iced::theme::Container::Box),
+        row![
+            column![
+                text("Key").size(14),
+                text_input("e.g. terrain", &gui.hex_grid_kv_key)
+                    .on_input(Message::HexGridKvKeyChanged)
+                    .padding(8),
+            ]
+            .spacing(6)
+            .width(Length::Fill),
+            column![
+                text("Value").size(14),
+                text_input("e.g. forest", &gui.hex_grid_kv_value)
+                    .on_input(Message::HexGridKvValueChanged)
+                    .padding(8),
+            ]
+            .spacing(6)
+            .width(Length::Fill),
+        ]
+        .spacing(12),
+        row![
+            button("Append key/value").on_press(Message::HexGridAppendKvToSelectedTile),
+            button("Clear tile").on_press(Message::HexGridTileClear(x, y)),
+        ]
+        .spacing(12),
+        text(
+            "Values are appended as JSON strings. You can extend parsing later for numbers/bools/objects.",
+        )
+        .size(12),
+    ]
+    .spacing(10);
+
+    container(column![title, horizontal_rule(1), kv_form].spacing(10))
+        .padding(12)
+        .width(Length::FillPortion(1))
+        .into()
+}
+
+struct HexGridProgram {
+    w: i32,
+    h: i32,
+    radius: f32,
+    padding: f32,
+
+    selected_x: Option<i32>,
+    selected_y: Option<i32>,
+
+    /// Present tiles (x,y) -> JSON payload
+    present: std::collections::BTreeSet<(i32, i32)>,
+
+    cache: Cache,
+}
+
+impl HexGridProgram {
+    fn new(
+        w: i32,
+        h: i32,
+        radius: f32,
+        padding: f32,
+        selected_x: Option<i32>,
+        selected_y: Option<i32>,
+        tile_json_by_xy: &std::collections::BTreeMap<(i32, i32), String>,
+    ) -> Self {
+        let present = tile_json_by_xy.keys().copied().collect();
+        Self {
+            w,
+            h,
+            radius,
+            padding,
+            selected_x,
+            selected_y,
+            present,
+            cache: Cache::new(),
+        }
+    }
+
+    fn hex_w(&self) -> f32 {
+        (3.0_f32).sqrt() * self.radius
+    }
+
+    fn hex_h(&self) -> f32 {
+        2.0 * self.radius
+    }
+
+    fn step_x(&self) -> f32 {
+        self.hex_w()
+    }
+
+    fn step_y(&self) -> f32 {
+        1.5 * self.radius
+    }
+
+    /// Pointy-top odd-r layout: odd rows shift right by half a column.
+    fn center_for(&self, x: i32, y: i32) -> Point {
+        let row_shift = if (y & 1) == 1 {
+            self.step_x() / 2.0
+        } else {
+            0.0
+        };
+
+        let cx = self.padding + row_shift + (x as f32) * self.step_x() + self.hex_w() / 2.0;
+        let cy = self.padding + (y as f32) * self.step_y() + self.hex_h() / 2.0;
+
+        Point::new(cx, cy)
+    }
+
+    fn hex_points(&self, center: Point) -> [Point; 6] {
+        // Pointy-top orientation:
+        // angle 0 at -90 degrees, then every 60 degrees.
+        let mut pts = [Point::ORIGIN; 6];
+        for i in 0..6 {
+            let angle = (-90.0_f32 + i as f32 * 60.0).to_radians();
+            pts[i] = Point::new(
+                center.x + self.radius * angle.cos(),
+                center.y + self.radius * angle.sin(),
+            );
+        }
+        pts
+    }
+
+    fn path_for(&self, x: i32, y: i32) -> Path {
+        let c = self.center_for(x, y);
+        let pts = self.hex_points(c);
+
+        Path::new(|b| {
+            b.move_to(pts[0]);
+            for p in &pts[1..] {
+                b.line_to(*p);
+            }
+            b.close();
+        })
+    }
+
+    fn point_in_poly(p: Point, poly: &[Point; 6]) -> bool {
+        // Ray casting algorithm.
+        let mut inside = false;
+        let mut j = 5usize;
+        for i in 0..6usize {
+            let pi = poly[i];
+            let pj = poly[j];
+
+            let intersects = ((pi.y > p.y) != (pj.y > p.y))
+                && (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y + 0.000001) + pi.x);
+            if intersects {
+                inside = !inside;
+            }
+            j = i;
+        }
+        inside
+    }
+
+    fn hit_test(&self, cursor: Point) -> Option<(i32, i32)> {
+        // Fast approximate: guess row by y, then guess col by x with row shift, then
+        // check a small neighborhood with exact point-in-hex.
+        let y_guess =
+            ((cursor.y - self.padding - self.hex_h() / 2.0) / self.step_y()).round() as i32;
+
+        let mut best: Option<(i32, i32)> = None;
+
+        for y in (y_guess - 2)..=(y_guess + 2) {
+            if y < 0 || y >= self.h {
+                continue;
+            }
+            let row_shift = if (y & 1) == 1 {
+                self.step_x() / 2.0
+            } else {
+                0.0
+            };
+            let x_guess = ((cursor.x - self.padding - row_shift - self.hex_w() / 2.0)
+                / self.step_x())
+            .round() as i32;
+
+            for x in (x_guess - 2)..=(x_guess + 2) {
+                if x < 0 || x >= self.w {
+                    continue;
+                }
+                let c = self.center_for(x, y);
+                let pts = self.hex_points(c);
+                if Self::point_in_poly(cursor, &pts) {
+                    best = Some((x, y));
+                    break;
+                }
+            }
+
+            if best.is_some() {
+                break;
+            }
+        }
+
+        best
+    }
+}
+
+impl Program<Message> for HexGridProgram {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let geom = self.cache.draw(renderer, bounds.size(), |frame| {
+            // Background
+            frame.fill_rectangle(
+                Point::ORIGIN,
+                frame.size(),
+                Color::from_rgba(0.08, 0.09, 0.11, 1.0),
+            );
+
+            let stroke_normal = Stroke {
+                width: 1.25,
+                style: canvas::Style::Solid(Color::from_rgba(0.55, 0.58, 0.64, 1.0)),
+                ..Stroke::default()
+            };
+
+            let stroke_selected = Stroke {
+                width: 2.25,
+                style: canvas::Style::Solid(Color::from_rgba(0.95, 0.78, 0.20, 1.0)),
+                ..Stroke::default()
+            };
+
+            let fill_present = Color::from_rgba(0.20, 0.45, 0.85, 0.35);
+            let fill_selected = Color::from_rgba(0.95, 0.78, 0.20, 0.25);
+
+            for y in 0..self.h {
+                for x in 0..self.w {
+                    let path = self.path_for(x, y);
+                    let is_selected = self.selected_x == Some(x) && self.selected_y == Some(y);
+                    let is_present = self.present.contains(&(x, y));
+
+                    if is_present {
+                        frame.fill(&path, fill_present);
+                    }
+
+                    if is_selected {
+                        frame.fill(&path, fill_selected);
+                        frame.stroke(&path, stroke_selected.clone());
+                    } else {
+                        frame.stroke(&path, stroke_normal.clone());
+                    }
+                }
+            }
+        });
+
+        vec![geom]
+    }
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        let cursor_pos = match cursor.position_in(bounds) {
+            Some(p) => p,
+            None => return (canvas::event::Status::Ignored, None),
+        };
+
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some((x, y)) = self.hit_test(cursor_pos) {
+                    return (
+                        canvas::event::Status::Captured,
+                        Some(Message::HexGridTileClicked(x, y)),
+                    );
+                }
+                (canvas::event::Status::Ignored, None)
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                if let Some((x, y)) = self.hit_test(cursor_pos) {
+                    return (
+                        canvas::event::Status::Captured,
+                        Some(Message::HexGridTileClear(x, y)),
+                    );
+                }
+                (canvas::event::Status::Ignored, None)
+            }
+            _ => (canvas::event::Status::Ignored, None),
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        let Some(p) = cursor.position_in(bounds) else {
+            return mouse::Interaction::default();
+        };
+        if self.hit_test(p).is_some() {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::default()
+        }
+    }
+}

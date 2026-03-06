@@ -1,13 +1,13 @@
 use rusqlite::Connection;
 
-pub(crate) fn open_in_memory_db() -> Connection {
+pub fn open_in_memory_db() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory sqlite db");
     conn.pragma_update(None, "foreign_keys", "ON")
         .expect("enable foreign_keys");
     conn
 }
 
-pub(crate) fn create_schema(conn: &Connection) {
+pub fn create_schema(conn: &Connection) {
     // Minimal schema matching the migrations, sufficient for unit tests.
     conn.execute_batch(
         r#"

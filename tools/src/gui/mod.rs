@@ -1,6 +1,7 @@
 mod shared;
 mod views;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -36,6 +37,7 @@ pub enum Tab {
     Levels,
     Actions,
     ArmorModifiers,
+    HexGrids,
 }
 
 impl Tab {
@@ -46,6 +48,7 @@ impl Tab {
             Tab::Levels => "Levels",
             Tab::Actions => "Actions",
             Tab::ArmorModifiers => "Armor Modifiers",
+            Tab::HexGrids => "Hex Grids",
         }
     }
 }
@@ -66,6 +69,16 @@ pub enum Message {
     SwitchTab(Tab),
 
     Refresh,
+
+    // Hex grid editor
+    HexGridWidthChanged(String),
+    HexGridHeightChanged(String),
+    HexGridApplyResize,
+    HexGridTileClicked(i32, i32),
+    HexGridTileClear(i32, i32),
+    HexGridKvKeyChanged(String),
+    HexGridKvValueChanged(String),
+    HexGridAppendKvToSelectedTile,
 
     // Armor modifiers form (single "draft" row editor)
     ArmorModifierValueChanged(String),
@@ -279,6 +292,16 @@ pub struct ToolsGui {
     pub armor_modifier_suit: String,
     pub armor_modifier_damage_type: String,
 
+    // Hex grid editor (UI state only)
+    pub hex_grid_width: String,
+    pub hex_grid_height: String,
+    pub hex_grid_selected_x: Option<i32>,
+    pub hex_grid_selected_y: Option<i32>,
+    pub hex_grid_kv_key: String,
+    pub hex_grid_kv_value: String,
+    // Map from (x,y) -> JSON text payload for that tile
+    pub hex_grid_tile_json_by_xy: BTreeMap<(i32, i32), String>,
+
     // Pending armor modifiers (used by create-card flows; linked on create)
     pub pending_armor_modifiers: Vec<app::cards::armor_modifier::ArmorModifier>,
 
@@ -345,6 +368,22 @@ impl Default for ToolsGui {
             armor_modifier_suit: "Spades".to_string(),
             armor_modifier_damage_type: "Physical".to_string(),
 
+            hex_grid_width: "9".to_string(),
+            hex_grid_height: "9".to_string(),
+            hex_grid_selected_x: None,
+            hex_grid_selected_y: None,
+            hex_grid_kv_key: String::new(),
+            hex_grid_kv_value: String::new(),
+            hex_grid_tile_json_by_xy: (|| {
+                let mut m = BTreeMap::new();
+                for y in 0..9_i32 {
+                    for x in 0..9_i32 {
+                        m.insert((x, y), "{}".to_string());
+                    }
+                }
+                m
+            })(),
+
             pending_armor_modifiers: vec![],
 
             units: vec![],
@@ -392,6 +431,134 @@ impl Application for ToolsGui {
             Message::SwitchTab(tab) => {
                 self.tab = tab;
                 self.active_view = ActiveView::List;
+                Command::none()
+            }
+
+            // Hex grid editor
+            Message::HexGridWidthChanged(v) => {
+                self.hex_grid_width = v;
+                Command::none()
+            }
+            Message::HexGridHeightChanged(v) => {
+                self.hex_grid_height = v;
+                Command::none()
+            }
+            Message::HexGridApplyResize => {
+                // Keep any tiles still in-bounds; drop anything out of bounds.
+                // NOTE: We do NOT auto-populate missing tiles here, because users can delete tiles.
+                let w = self
+                    .hex_grid_width
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|v| *v > 0);
+                let h = self
+                    .hex_grid_height
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|v| *v > 0);
+
+                if let (Some(w), Some(h)) = (w, h) {
+                    self.hex_grid_tile_json_by_xy
+                        .retain(|(x, y), _| *x >= 0 && *y >= 0 && *x < w && *y < h);
+
+                    if let (Some(x), Some(y)) = (self.hex_grid_selected_x, self.hex_grid_selected_y)
+                    {
+                        if x < 0 || y < 0 || x >= w || y >= h {
+                            self.hex_grid_selected_x = None;
+                            self.hex_grid_selected_y = None;
+                            self.hex_grid_kv_key.clear();
+                            self.hex_grid_kv_value.clear();
+                        }
+                    }
+                } else {
+                    self.status = Some("Width/height must be positive integers".to_string());
+                }
+
+                Command::none()
+            }
+            Message::HexGridTileClicked(x, y) => {
+                self.hex_grid_selected_x = Some(x);
+                self.hex_grid_selected_y = Some(y);
+
+                // Left-clicking an empty coordinate creates a tile with empty JSON.
+                self.hex_grid_tile_json_by_xy
+                    .entry((x, y))
+                    .or_insert_with(|| "{}".to_string());
+
+                Command::none()
+            }
+            Message::HexGridTileClear(x, y) => {
+                // Right-click deletes a tile from the grid (make this coordinate empty).
+                self.hex_grid_tile_json_by_xy.remove(&(x, y));
+
+                if self.hex_grid_selected_x == Some(x) && self.hex_grid_selected_y == Some(y) {
+                    self.hex_grid_selected_x = None;
+                    self.hex_grid_selected_y = None;
+                    self.hex_grid_kv_key.clear();
+                    self.hex_grid_kv_value.clear();
+                }
+
+                Command::none()
+            }
+            Message::HexGridKvKeyChanged(v) => {
+                self.hex_grid_kv_key = v;
+                Command::none()
+            }
+            Message::HexGridKvValueChanged(v) => {
+                self.hex_grid_kv_value = v;
+                Command::none()
+            }
+            Message::HexGridAppendKvToSelectedTile => {
+                let (Some(x), Some(y)) = (self.hex_grid_selected_x, self.hex_grid_selected_y)
+                else {
+                    self.status = Some("Select a tile first".to_string());
+                    return Command::none();
+                };
+
+                let key = self.hex_grid_kv_key.trim();
+                if key.is_empty() {
+                    self.status = Some("Key cannot be empty".to_string());
+                    return Command::none();
+                }
+
+                // For now, treat the value as a JSON string literal by default.
+                // If you later want smarter parsing (numbers/bools/objects), do it here.
+                let value_str = self.hex_grid_kv_value.trim();
+                let value_json = format!(
+                    "\"{}\"",
+                    value_str.replace('\\', "\\\\").replace('"', "\\\"")
+                );
+
+                let current = self
+                    .hex_grid_tile_json_by_xy
+                    .get(&(x, y))
+                    .map(|s| s.as_str())
+                    .unwrap_or("{}")
+                    .trim();
+
+                // Extremely small JSON "object insert" helper:
+                // - If current is `{}` -> `{ "k": "v" }`
+                // - If current starts with `{` and ends with `}` -> insert before final `}`
+                // - Otherwise, replace with a new object
+                let updated = if current == "{}" {
+                    format!("{{\"{}\":{}}}", key, value_json)
+                } else if current.starts_with('{') && current.ends_with('}') {
+                    let inner = &current[1..current.len() - 1].trim();
+                    if inner.is_empty() {
+                        format!("{{\"{}\":{}}}", key, value_json)
+                    } else {
+                        format!("{{{},\"{}\":{}}}", inner, key, value_json)
+                    }
+                } else {
+                    format!("{{\"{}\":{}}}", key, value_json)
+                };
+
+                self.hex_grid_tile_json_by_xy.insert((x, y), updated);
+                self.hex_grid_kv_key.clear();
+                self.hex_grid_kv_value.clear();
+
                 Command::none()
             }
 
@@ -902,6 +1069,7 @@ impl Application for ToolsGui {
             views::tab_button(self.tab, Tab::Levels),
             views::tab_button(self.tab, Tab::Actions),
             views::tab_button(self.tab, Tab::ArmorModifiers),
+            views::tab_button(self.tab, Tab::HexGrids),
             iced::widget::Space::with_width(Length::Fill),
         ]
         .spacing(8);
@@ -944,6 +1112,7 @@ impl Application for ToolsGui {
                 }
                 _ => views::armor_modifiers::view(self),
             },
+            Tab::HexGrids => views::hex_grids::view(self),
         };
 
         container(
