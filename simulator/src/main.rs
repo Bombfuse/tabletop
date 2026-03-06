@@ -1,13 +1,135 @@
-use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, scrollable, text};
-use iced::{Application, Element, Length, Settings, Theme};
+use iced::{Application, Element, Settings, Theme};
 
 use data::cards::unit;
+use rusqlite::OptionalExtension;
+
+mod pages;
 
 const CORE_DB_PATH: &str = "tabletop.sqlite3";
 const SIMULATOR_DB_PATH: &str = "simulator.sqlite3";
 
+const MIGRATIONS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS migrations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename      TEXT NOT NULL UNIQUE,
+    applied_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CampaignSummary {
+    id: i64,
+    hero_unit_name: String,
+    created_at: String,
+}
+
+fn open_simulator_db() -> anyhow::Result<rusqlite::Connection> {
+    use anyhow::Context;
+
+    let conn = rusqlite::Connection::open(SIMULATOR_DB_PATH)
+        .with_context(|| format!("open simulator db at `{SIMULATOR_DB_PATH}`"))?;
+
+    // Reasonable defaults for application DBs.
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .context("enable foreign_keys for simulator db")?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .context("set journal_mode=WAL for simulator db")?;
+
+    Ok(conn)
+}
+
+/// Applies all simulator migrations to the simulator database.
+///
+/// Migrations live in `simulator/migrations/*.sql` and are applied in lexical order
+/// by filename. Each file is applied at most once (tracked in the `migrations` table).
+fn apply_simulator_migrations() -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let mut conn = open_simulator_db().context("open simulator db")?;
+
+    conn.execute_batch(MIGRATIONS_TABLE_SQL)
+        .context("ensure migrations table exists in simulator db")?;
+
+    // Load migration files embedded at compile-time.
+    //
+    // NOTE: If you add a migration file, you must also add it to this list.
+    let migrations: &[(&str, &str)] = &[(
+        "0001_campaigns.sql",
+        include_str!("../migrations/0001_campaigns.sql"),
+    )];
+
+    for (filename, sql) in migrations {
+        let already_applied: bool = conn
+            .query_row(
+                "SELECT 1 FROM migrations WHERE filename = ?1",
+                rusqlite::params![filename],
+                |_row| Ok(true),
+            )
+            .optional()
+            .context("check whether migration is already applied")?
+            .unwrap_or(false);
+
+        if already_applied {
+            continue;
+        }
+
+        let tx = conn
+            .transaction()
+            .with_context(|| format!("begin transaction for migration `{filename}`"))?;
+
+        tx.execute_batch(sql)
+            .with_context(|| format!("apply migration `{filename}`"))?;
+
+        tx.execute(
+            "INSERT INTO migrations (filename) VALUES (?1)",
+            rusqlite::params![filename],
+        )
+        .with_context(|| format!("record migration `{filename}`"))?;
+
+        tx.commit()
+            .with_context(|| format!("commit migration `{filename}`"))?;
+    }
+
+    Ok(())
+}
+
+fn list_campaigns(conn: &rusqlite::Connection) -> anyhow::Result<Vec<CampaignSummary>> {
+    use anyhow::Context;
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT id, hero_unit_name, created_at
+            FROM campaigns
+            ORDER BY datetime(created_at) DESC, id DESC
+            "#,
+        )
+        .context("prepare list campaigns query")?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CampaignSummary {
+                id: row.get(0)?,
+                hero_unit_name: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })
+        .context("query campaigns")?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.context("read campaign row")?);
+    }
+    Ok(out)
+}
+
 fn main() -> iced::Result {
+    // Run simulator migrations on startup (simulator DB is separate from core DB).
+    if let Err(e) = apply_simulator_migrations() {
+        eprintln!("Failed to apply simulator migrations: {e:#}");
+        // Continue launching UI; DB errors will be surfaced again when starting a campaign.
+    }
+
     Simulator::run(Settings {
         window: iced::window::Settings {
             size: iced::Size::new(900.0, 600.0),
@@ -21,16 +143,21 @@ fn main() -> iced::Result {
 enum Screen {
     MainMenu,
     CampaignSelectHero,
+    CampaignContinueSelect,
+    CampaignHome { campaign_id: i64 },
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     StartCampaign,
+    ContinueCampaign,
     ExitApp,
     BackToMenu,
 
     SelectHero(String),
     BeginCampaign,
+
+    SelectCampaign(i64),
 }
 
 struct Simulator {
@@ -41,6 +168,8 @@ struct Simulator {
     load_error: Option<String>,
 
     campaign_saved: Option<String>,
+
+    campaigns: Vec<CampaignSummary>,
 }
 
 impl Simulator {
@@ -48,134 +177,11 @@ impl Simulator {
         match self.screen {
             Screen::MainMenu => "Tabletop Simulator".to_string(),
             Screen::CampaignSelectHero => "Tabletop Simulator — Start Campaign".to_string(),
-        }
-    }
-
-    fn view_main_menu(&self) -> Element<'_, Message> {
-        let title = text("Main Menu")
-            .size(44)
-            .horizontal_alignment(Horizontal::Center);
-
-        let start = button(text("Start Campaign").size(24))
-            .padding(14)
-            .width(Length::Fixed(260.0))
-            .on_press(Message::StartCampaign);
-
-        let exit = button(text("Exit App").size(24))
-            .padding(14)
-            .width(Length::Fixed(260.0))
-            .on_press(Message::ExitApp);
-
-        let content = column![title, start, exit]
-            .spacing(18)
-            .align_items(iced::Alignment::Center)
-            .width(Length::Fill);
-
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center)
-            .padding(24)
-            .into()
-    }
-
-    fn view_campaign_select_hero(&self) -> Element<'_, Message> {
-        let heading = text("Start Campaign")
-            .size(40)
-            .horizontal_alignment(Horizontal::Center);
-
-        let sub = text("Select your hero unit:")
-            .size(18)
-            .horizontal_alignment(Horizontal::Center);
-
-        let selected = match self.selected_hero.as_deref() {
-            Some(name) => text(format!("Selected hero: {name}"))
-                .size(16)
-                .horizontal_alignment(Horizontal::Center),
-            None => text("Selected hero: (none)")
-                .size(16)
-                .horizontal_alignment(Horizontal::Center),
-        };
-
-        let saved = match self.campaign_saved.as_deref() {
-            Some(msg) => text(msg).size(16).horizontal_alignment(Horizontal::Center),
-            None => text("").size(1),
-        };
-
-        let error = match self.load_error.as_deref() {
-            Some(e) => text(format!("DB error: {e}"))
-                .size(16)
-                .horizontal_alignment(Horizontal::Center),
-            None => text("").size(1),
-        };
-
-        let mut list = column![].spacing(10).width(Length::Fill);
-
-        if self.units.is_empty() && self.load_error.is_none() {
-            list = list.push(
-                text("No units found in the database.")
-                    .size(16)
-                    .horizontal_alignment(Horizontal::Center),
-            );
-        } else {
-            for u in &self.units {
-                let is_selected = self.selected_hero.as_deref() == Some(u.name.as_str());
-
-                let name = if is_selected {
-                    format!("{} (Hero)", u.name)
-                } else {
-                    u.name.clone()
-                };
-
-                let stats = format!(
-                    "STR {}  FOC {}  INT {}  AGI {}  KNO {}",
-                    u.strength, u.focus, u.intelligence, u.agility, u.knowledge
-                );
-
-                let select = button(text("Select").size(14))
-                    .padding(8)
-                    .on_press(Message::SelectHero(u.name.clone()));
-
-                let row_item = row![
-                    column![text(name).size(18), text(stats).size(14)].spacing(4),
-                    select
-                ]
-                .spacing(16)
-                .align_items(iced::Alignment::Center);
-
-                list = list.push(container(row_item).padding(10));
+            Screen::CampaignContinueSelect => "Tabletop Simulator — Continue Campaign".to_string(),
+            Screen::CampaignHome { campaign_id } => {
+                format!("Tabletop Simulator — Campaign #{campaign_id}")
             }
         }
-
-        let list = scrollable(container(list).width(Length::Fill)).height(Length::FillPortion(1));
-
-        let begin_enabled = self.selected_hero.is_some();
-        let mut begin = button(text("Begin Campaign").size(18))
-            .padding(12)
-            .width(Length::Fixed(200.0));
-        if begin_enabled {
-            begin = begin.on_press(Message::BeginCampaign);
-        }
-
-        let back = button(text("Back to Menu").size(18))
-            .padding(12)
-            .width(Length::Fixed(200.0))
-            .on_press(Message::BackToMenu);
-
-        let content = column![heading, sub, selected, saved, error, list, begin, back]
-            .spacing(14)
-            .align_items(iced::Alignment::Center)
-            .width(Length::Fill)
-            .height(Length::Fill);
-
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center)
-            .padding(24)
-            .into()
     }
 }
 
@@ -193,6 +199,7 @@ impl iced::Application for Simulator {
                 selected_hero: None,
                 load_error: None,
                 campaign_saved: None,
+                campaigns: Vec::new(),
             },
             iced::Command::none(),
         )
@@ -223,6 +230,25 @@ impl iced::Application for Simulator {
 
                 iced::Command::none()
             }
+            Message::ContinueCampaign => {
+                self.screen = Screen::CampaignContinueSelect;
+
+                self.load_error = None;
+                self.campaign_saved = None;
+                self.campaigns.clear();
+
+                if let Err(e) = apply_simulator_migrations() {
+                    self.load_error = Some(format!("Failed to apply simulator migrations: {e}"));
+                    return iced::Command::none();
+                }
+
+                match open_simulator_db().and_then(|conn| list_campaigns(&conn)) {
+                    Ok(campaigns) => self.campaigns = campaigns,
+                    Err(e) => self.load_error = Some(e.to_string()),
+                }
+
+                iced::Command::none()
+            }
             Message::SelectHero(name) => {
                 self.selected_hero = Some(name);
                 self.campaign_saved = None;
@@ -236,35 +262,22 @@ impl iced::Application for Simulator {
                     return iced::Command::none();
                 };
 
-                // Simulator DB is separate from the core tabletop DB and is used for campaign persistence.
-                // We keep it simple and create the schema on demand.
-                match rusqlite::Connection::open(SIMULATOR_DB_PATH)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|conn| {
-                        conn.pragma_update(None, "foreign_keys", "ON")?;
-                        conn.pragma_update(None, "journal_mode", "WAL")?;
+                // Ensure simulator DB schema is up-to-date before writing campaign data.
+                if let Err(e) = apply_simulator_migrations() {
+                    self.load_error = Some(format!("Failed to apply simulator migrations: {e}"));
+                    return iced::Command::none();
+                }
 
-                        conn.execute_batch(
-                            r#"
-                            CREATE TABLE IF NOT EXISTS campaigns (
-                                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                                hero_unit_name     TEXT NOT NULL,
-                                created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                            );
-                            CREATE INDEX IF NOT EXISTS idx_campaigns_created_at ON campaigns(created_at);
-                            "#,
-                        )?;
-
-                        conn.execute(
-                            r#"
-                            INSERT INTO campaigns (hero_unit_name)
-                            VALUES (?1)
-                            "#,
-                            rusqlite::params![hero_name],
-                        )?;
-
-                        Ok(())
-                    }) {
+                match open_simulator_db().and_then(|conn| {
+                    conn.execute(
+                        r#"
+                        INSERT INTO campaigns (hero_unit_name)
+                        VALUES (?1)
+                        "#,
+                        rusqlite::params![hero_name],
+                    )?;
+                    Ok(())
+                }) {
                     Ok(()) => {
                         self.campaign_saved =
                             Some("Campaign created and saved to simulator database.".to_string());
@@ -274,6 +287,12 @@ impl iced::Application for Simulator {
                     }
                 }
 
+                iced::Command::none()
+            }
+            Message::SelectCampaign(campaign_id) => {
+                self.load_error = None;
+                self.campaign_saved = None;
+                self.screen = Screen::CampaignHome { campaign_id };
                 iced::Command::none()
             }
             Message::BackToMenu => {
@@ -286,8 +305,17 @@ impl iced::Application for Simulator {
 
     fn view(&self) -> Element<'_, Self::Message> {
         match self.screen {
-            Screen::MainMenu => self.view_main_menu(),
-            Screen::CampaignSelectHero => self.view_campaign_select_hero(),
+            Screen::MainMenu => pages::main_menu::view(),
+            Screen::CampaignSelectHero => pages::start_campaign::view(
+                &self.units,
+                self.selected_hero.as_deref(),
+                self.campaign_saved.as_deref(),
+                self.load_error.as_deref(),
+            ),
+            Screen::CampaignContinueSelect => {
+                pages::continue_campaign::view(&self.campaigns, self.load_error.as_deref())
+            }
+            Screen::CampaignHome { campaign_id } => pages::campaign_home::view(campaign_id),
         }
     }
 }
