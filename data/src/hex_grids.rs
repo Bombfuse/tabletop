@@ -44,17 +44,23 @@ pub struct HexTile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HexGrid {
     pub id: Option<i64>,
+    pub name: String,
     pub width: i32,
     pub height: i32,
 }
 
 impl HexGrid {
-    pub fn generate(width: i32, height: i32) -> Result<Self> {
+    pub fn generate(name: impl Into<String>, width: i32, height: i32) -> Result<Self> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(anyhow!("name must be non-empty"));
+        }
         if width <= 0 || height <= 0 {
             return Err(anyhow!("width and height must be > 0"));
         }
         Ok(Self {
             id: None,
+            name,
             width,
             height,
         })
@@ -81,10 +87,10 @@ impl HexGrid {
     pub fn insert(&mut self, conn: &Connection) -> Result<i64> {
         conn.execute(
             r#"
-            INSERT INTO hex_grids (width, height)
-            VALUES (?1, ?2)
+            INSERT INTO hex_grids (name, width, height)
+            VALUES (?1, ?2, ?3)
             "#,
-            params![self.width, self.height],
+            params![self.name, self.width, self.height],
         )?;
 
         let id = conn.last_insert_rowid();
@@ -96,7 +102,7 @@ impl HexGrid {
         let row = conn
             .query_row(
                 r#"
-                SELECT id, width, height
+                SELECT id, name, width, height
                 FROM hex_grids
                 WHERE id = ?1
                 "#,
@@ -104,8 +110,9 @@ impl HexGrid {
                 |r| {
                     Ok(HexGrid {
                         id: Some(r.get::<_, i64>(0)?),
-                        width: r.get::<_, i32>(1)?,
-                        height: r.get::<_, i32>(2)?,
+                        name: r.get::<_, String>(1)?,
+                        width: r.get::<_, i32>(2)?,
+                        height: r.get::<_, i32>(3)?,
                     })
                 },
             )
@@ -226,15 +233,19 @@ mod tests {
             r#"
             CREATE TABLE hex_grids (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL UNIQUE,
                 width       INTEGER NOT NULL,
                 height      INTEGER NOT NULL,
 
                 created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 
+                CHECK (length(trim(name)) > 0),
                 CHECK (width > 0),
                 CHECK (height > 0)
             );
+
+            CREATE INDEX idx_hex_grids_name ON hex_grids(name);
 
             CREATE TRIGGER trg_hex_grids_updated_at
             AFTER UPDATE ON hex_grids
@@ -322,7 +333,7 @@ mod tests {
         let conn = open_in_memory_db();
         create_hex_schema(&conn);
 
-        let mut grid = HexGrid::generate(7, 7)?;
+        let mut grid = HexGrid::generate("test-grid", 7, 7)?;
         let grid_id = grid.insert(&conn)?;
 
         // carve into a hex-ish silhouette using empty spaces
@@ -330,6 +341,7 @@ mod tests {
 
         // Persisted tiles should be queryable via a fresh loaded grid
         let loaded = HexGrid::load(&conn, grid_id)?;
+        assert_eq!(loaded.name, "test-grid");
         assert_eq!(loaded.width, 7);
         assert_eq!(loaded.height, 7);
 
@@ -374,7 +386,7 @@ mod tests {
         let conn = open_in_memory_db();
         create_hex_schema(&conn);
 
-        let mut grid = HexGrid::generate(3, 2)?;
+        let mut grid = HexGrid::generate("bounds-grid", 3, 2)?;
         grid.insert(&conn)?;
 
         let err = grid

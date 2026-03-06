@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use iced::widget::{button, column, container, horizontal_rule, row, text};
 use iced::{Application, Command, Element, Length, Settings, Subscription, Theme};
+use rusqlite::OptionalExtension;
 
 use crate::app;
 
@@ -73,6 +74,15 @@ pub enum Message {
     // Hex grid editor
     HexGridWidthChanged(String),
     HexGridHeightChanged(String),
+    HexGridNameChanged(String),
+    CreateNewHexGrid,
+    SaveHexGrid,
+
+    // Hex grid list/load
+    RefreshHexGrids,
+    LoadHexGridById(i64),
+    DeleteHexGridById(i64),
+
     HexGridApplyResize,
     HexGridTileClicked(i32, i32),
     HexGridTileClear(i32, i32),
@@ -295,6 +305,14 @@ pub struct ToolsGui {
     // Hex grid editor (UI state only)
     pub hex_grid_width: String,
     pub hex_grid_height: String,
+
+    // Name + persisted id (for future list/edit/delete workflows)
+    pub hex_grid_name: String,
+    pub hex_grid_id: Option<i64>,
+
+    // Loaded list of existing grids (for list/edit/delete UI)
+    pub hex_grids: Vec<HexGridRow>,
+
     pub hex_grid_selected_x: Option<i32>,
     pub hex_grid_selected_y: Option<i32>,
     pub hex_grid_kv_key: String,
@@ -315,6 +333,14 @@ pub struct ToolsGui {
     // ui state
     pub status: Option<String>,
     pub active_view: ActiveView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexGridRow {
+    pub id: i64,
+    pub name: String,
+    pub width: i32,
+    pub height: i32,
 }
 
 impl Default for ToolsGui {
@@ -370,6 +396,12 @@ impl Default for ToolsGui {
 
             hex_grid_width: "9".to_string(),
             hex_grid_height: "9".to_string(),
+
+            hex_grid_name: "New Hex Grid".to_string(),
+            hex_grid_id: None,
+
+            hex_grids: vec![],
+
             hex_grid_selected_x: None,
             hex_grid_selected_y: None,
             hex_grid_kv_key: String::new(),
@@ -431,6 +463,12 @@ impl Application for ToolsGui {
             Message::SwitchTab(tab) => {
                 self.tab = tab;
                 self.active_view = ActiveView::List;
+
+                // When entering the Hex Grids tab, refresh the list.
+                if self.tab == Tab::HexGrids {
+                    return Command::perform(async {}, |_| Message::RefreshHexGrids);
+                }
+
                 Command::none()
             }
 
@@ -443,35 +481,145 @@ impl Application for ToolsGui {
                 self.hex_grid_height = v;
                 Command::none()
             }
+            Message::HexGridNameChanged(v) => {
+                self.hex_grid_name = v;
+                Command::none()
+            }
+            Message::CreateNewHexGrid => {
+                // Reset the editor to a new, unsaved grid.
+                // Keep the current width/height inputs, but clear the saved id and tiles.
+                let width: i32 = self.hex_grid_width.trim().parse().unwrap_or(9).max(1);
+                let height: i32 = self.hex_grid_height.trim().parse().unwrap_or(9).max(1);
+
+                self.hex_grid_id = None;
+                self.hex_grid_name = "New Hex Grid".to_string();
+
+                // Start fully populated with empty JSON for all in-bounds tiles.
+                let mut m = BTreeMap::new();
+                for y in 0..height {
+                    for x in 0..width {
+                        m.insert((x, y), "{}".to_string());
+                    }
+                }
+                self.hex_grid_tile_json_by_xy = m;
+
+                // Clear selection/editor buffers
+                self.hex_grid_selected_x = None;
+                self.hex_grid_selected_y = None;
+                self.hex_grid_kv_key.clear();
+                self.hex_grid_kv_value.clear();
+
+                Command::none()
+            }
+            Message::SaveHexGrid => {
+                if let Err(e) = self.save_hex_grid_from_editor_state() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    let msg = match self.hex_grid_id {
+                        Some(id) => format!("Hex grid saved (id={id})"),
+                        None => "Hex grid saved".to_string(),
+                    };
+                    self.status = Some(msg);
+                    Command::perform(async {}, |_| Message::RefreshHexGrids)
+                }
+            }
+
+            // Hex grid list/load
+            Message::RefreshHexGrids => {
+                if let Err(e) = self.refresh_hex_grids_list() {
+                    self.status = Some(format!("{e:#}"));
+                }
+                Command::none()
+            }
+            Message::LoadHexGridById(id) => {
+                if let Err(e) = self.load_hex_grid_into_editor(id) {
+                    self.status = Some(format!("{e:#}"));
+                }
+                Command::none()
+            }
+            Message::DeleteHexGridById(id) => {
+                if let Err(e) = self.delete_hex_grid_by_id(id) {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    // If we're currently editing this grid, clear the editor id.
+                    if self.hex_grid_id == Some(id) {
+                        self.hex_grid_id = None;
+                    }
+                    Command::perform(async {}, |_| Message::RefreshHexGrids)
+                }
+            }
+
             Message::HexGridApplyResize => {
                 // Keep any tiles still in-bounds; drop anything out of bounds.
-                // NOTE: We do NOT auto-populate missing tiles here, because users can delete tiles.
-                let w = self
+                //
+                // Resizing behavior:
+                // - Preserve explicit deletions for tiles that were already in-bounds before.
+                // - Auto-populate any *newly in-bounds* coordinates with empty JSON ("{}").
+                //
+                // IMPORTANT: parse "old" dimensions before we overwrite the input fields.
+                let old_w = self
                     .hex_grid_width
                     .trim()
                     .parse::<i32>()
                     .ok()
                     .filter(|v| *v > 0);
-                let h = self
+                let old_h = self
                     .hex_grid_height
                     .trim()
                     .parse::<i32>()
                     .ok()
                     .filter(|v| *v > 0);
 
-                if let (Some(w), Some(h)) = (w, h) {
-                    self.hex_grid_tile_json_by_xy
-                        .retain(|(x, y), _| *x >= 0 && *y >= 0 && *x < w && *y < h);
+                let new_w = self
+                    .hex_grid_width
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|v| *v > 0);
+                let new_h = self
+                    .hex_grid_height
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|v| *v > 0);
 
+                if let (Some(new_w), Some(new_h)) = (new_w, new_h) {
+                    let old_w = old_w.unwrap_or(new_w);
+                    let old_h = old_h.unwrap_or(new_h);
+
+                    // First, prune tiles that are now out of bounds.
+                    self.hex_grid_tile_json_by_xy
+                        .retain(|(x, y), _| *x >= 0 && *y >= 0 && *x < new_w && *y < new_h);
+
+                    // Then, auto-populate tiles that are newly in-bounds due to the resize.
+                    // This preserves deletions for tiles that were already in-bounds.
+                    for y in 0..new_h {
+                        for x in 0..new_w {
+                            let was_in_old_bounds = x < old_w && y < old_h;
+                            if !was_in_old_bounds {
+                                self.hex_grid_tile_json_by_xy
+                                    .entry((x, y))
+                                    .or_insert_with(|| "{}".to_string());
+                            }
+                        }
+                    }
+
+                    // If selection is now out of bounds, clear it.
                     if let (Some(x), Some(y)) = (self.hex_grid_selected_x, self.hex_grid_selected_y)
                     {
-                        if x < 0 || y < 0 || x >= w || y >= h {
+                        if x < 0 || y < 0 || x >= new_w || y >= new_h {
                             self.hex_grid_selected_x = None;
                             self.hex_grid_selected_y = None;
                             self.hex_grid_kv_key.clear();
                             self.hex_grid_kv_value.clear();
                         }
                     }
+
+                    // Finally, keep the editor inputs consistent with what we applied.
+                    self.hex_grid_width = new_w.to_string();
+                    self.hex_grid_height = new_h.to_string();
                 } else {
                     self.status = Some("Width/height must be positive integers".to_string());
                 }
@@ -1380,6 +1528,242 @@ impl ToolsGui {
         self.levels = views::levels::list_levels(&conn)?;
         self.actions = views::actions::list_actions(&conn)?;
         self.armor_modifiers = views::armor_modifiers::list_armor_modifiers(&conn)?;
+
+        Ok(())
+    }
+
+    fn refresh_hex_grids_list(&mut self) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        // Requires migration 0009 (hex_grids.name).
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, name, width, height
+            FROM hex_grids
+            ORDER BY updated_at DESC, id DESC
+            "#,
+        )?;
+
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(HexGridRow {
+                id: r.get::<_, i64>(0)?,
+                name: r.get::<_, String>(1)?,
+                width: r.get::<_, i32>(2)?,
+                height: r.get::<_, i32>(3)?,
+            });
+        }
+
+        self.hex_grids = out;
+        Ok(())
+    }
+
+    fn load_hex_grid_into_editor(&mut self, id: i64) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        // Load grid metadata
+        let (name, width, height): (String, i32, i32) = conn.query_row(
+            r#"
+            SELECT name, width, height
+            FROM hex_grids
+            WHERE id = ?1
+            "#,
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+
+        // Load tiles
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT x, y, COALESCE(user_data_json, '{}')
+            FROM hex_tiles
+            WHERE hex_grid_id = ?1
+            "#,
+        )?;
+
+        let mut tile_map: BTreeMap<(i32, i32), String> = BTreeMap::new();
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        while let Some(r) = rows.next()? {
+            let x: i32 = r.get(0)?;
+            let y: i32 = r.get(1)?;
+            let json: String = r.get(2)?;
+            tile_map.insert((x, y), json);
+        }
+
+        // Update editor state
+        self.hex_grid_id = Some(id);
+        self.hex_grid_name = name;
+        self.hex_grid_width = width.to_string();
+        self.hex_grid_height = height.to_string();
+        self.hex_grid_tile_json_by_xy = tile_map;
+
+        // Clear selection/editor kv buffer
+        self.hex_grid_selected_x = None;
+        self.hex_grid_selected_y = None;
+        self.hex_grid_kv_key.clear();
+        self.hex_grid_kv_value.clear();
+
+        Ok(())
+    }
+
+    fn delete_hex_grid_by_id(&mut self, id: i64) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        // Cascade deletes tiles.
+        conn.execute(
+            r#"DELETE FROM hex_grids WHERE id = ?1"#,
+            rusqlite::params![id],
+        )?;
+
+        Ok(())
+    }
+
+    fn save_hex_grid_from_editor_state(&mut self) -> Result<()> {
+        // Validate form
+        let name = self.hex_grid_name.trim();
+        if name.is_empty() {
+            bail!("Hex grid name cannot be empty");
+        }
+
+        let width: i32 = self
+            .hex_grid_width
+            .trim()
+            .parse()
+            .with_context(|| format!("Invalid width: {}", self.hex_grid_width))?;
+        let height: i32 = self
+            .hex_grid_height
+            .trim()
+            .parse()
+            .with_context(|| format!("Invalid height: {}", self.hex_grid_height))?;
+
+        if width <= 0 || height <= 0 {
+            bail!("Width/height must be > 0");
+        }
+
+        let conn = self.open_conn()?;
+        let tx = conn.unchecked_transaction()?;
+
+        // Save the hex grid row.
+        //
+        // We cannot rely on `ON CONFLICT(name)` unless the DB has a UNIQUE constraint/index on `name`.
+        // To be robust across schemas, we do:
+        // - If we already have `hex_grid_id`, update that row.
+        // - Else, try to find an existing row by name (if the column exists), then update it.
+        // - Else, insert a new row (requires `name` column to exist).
+        //
+        // If your DB has migration 0009 applied, `name` exists and should be unique via an index.
+        let grid_id: i64 = if let Some(id) = self.hex_grid_id {
+            tx.execute(
+                r#"
+                UPDATE hex_grids
+                SET name = ?1,
+                    width = ?2,
+                    height = ?3,
+                    updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                WHERE id = ?4
+                "#,
+                rusqlite::params![name, width, height, id],
+            )
+            .with_context(|| format!("Update hex_grids by id={id}"))?;
+
+            id
+        } else {
+            // Attempt to locate an existing grid by name. This will fail if the `name` column
+            // does not exist yet; in that case, we surface a clear error telling you to apply migrations.
+            let existing_id: Option<i64> = tx
+                .query_row(
+                    r#"SELECT id FROM hex_grids WHERE name = ?1"#,
+                    rusqlite::params![name],
+                    |r| r.get(0),
+                )
+                .optional()
+                .with_context(|| "Lookup hex_grids id by name (requires migration 0009)")?;
+
+            if let Some(id) = existing_id {
+                tx.execute(
+                    r#"
+                    UPDATE hex_grids
+                    SET width = ?1,
+                        height = ?2,
+                        updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    WHERE id = ?3
+                    "#,
+                    rusqlite::params![width, height, id],
+                )
+                .with_context(|| format!("Update hex_grids by id={id}"))?;
+
+                id
+            } else {
+                tx.execute(
+                    r#"
+                    INSERT INTO hex_grids (name, width, height)
+                    VALUES (?1, ?2, ?3)
+                    "#,
+                    rusqlite::params![name, width, height],
+                )
+                .with_context(|| "Insert hex_grids row (requires migration 0009)")?;
+
+                tx.last_insert_rowid()
+            }
+        };
+
+        // Delete any tiles that are now out-of-bounds for the new size.
+        tx.execute(
+            r#"
+            DELETE FROM hex_tiles
+            WHERE hex_grid_id = ?1
+              AND (x < 0 OR y < 0 OR x >= ?2 OR y >= ?3)
+            "#,
+            rusqlite::params![grid_id, width, height],
+        )
+        .with_context(|| "Delete out-of-bounds hex tiles")?;
+
+        // Sync tiles:
+        // - For every present tile in the editor map, upsert the row.
+        // - For every in-bounds coordinate missing from the map, delete the row (empty space).
+        let mut seen = std::collections::HashSet::<(i32, i32)>::new();
+
+        for (&(x, y), json) in self.hex_grid_tile_json_by_xy.iter() {
+            if x < 0 || y < 0 || x >= width || y >= height {
+                continue;
+            }
+            seen.insert((x, y));
+
+            tx.execute(
+                r#"
+                INSERT INTO hex_tiles (hex_grid_id, x, y, user_data_json)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(hex_grid_id, x, y)
+                DO UPDATE SET
+                    user_data_json = excluded.user_data_json,
+                    updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                "#,
+                rusqlite::params![grid_id, x, y, json],
+            )
+            .with_context(|| format!("Upsert hex tile ({x},{y})"))?;
+        }
+
+        // Delete all tiles in-bounds that are not in `seen`.
+        // This can be a bit heavier for large grids, but is simple/correct for now.
+        for y in 0..height {
+            for x in 0..width {
+                if !seen.contains(&(x, y)) {
+                    tx.execute(
+                        r#"
+                        DELETE FROM hex_tiles
+                        WHERE hex_grid_id = ?1 AND x = ?2 AND y = ?3
+                        "#,
+                        rusqlite::params![grid_id, x, y],
+                    )
+                    .with_context(|| format!("Delete empty hex tile ({x},{y})"))?;
+                }
+            }
+        }
+
+        tx.commit()?;
+
+        self.hex_grid_id = Some(grid_id);
 
         Ok(())
     }

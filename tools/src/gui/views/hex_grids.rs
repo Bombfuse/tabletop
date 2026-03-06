@@ -1,9 +1,9 @@
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Canvas, Event, Geometry, Path, Program, Stroke};
-use iced::widget::{button, column, container, horizontal_rule, row, text, text_input};
+use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, text_input};
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Theme, Vector};
 
-use crate::gui::{Message, ToolsGui};
+use crate::gui::{HexGridRow, Message, ToolsGui};
 
 /// Hex grid editor view with true pointy-top hexagon rendering.
 ///
@@ -12,16 +12,25 @@ use crate::gui::{Message, ToolsGui};
 /// - Rendered as pointy-top hexes using an "odd-r" offset layout (odd rows shifted right).
 ///
 /// Persistence:
-/// - This view is UI-only; it edits fields on `ToolsGui` and sends `Message`s.
-/// - DB save/load can be added by handling additional messages in `ToolsGui::update`.
+/// - Naming + saving are handled by Messages (`HexGridNameChanged`, `SaveHexGrid`).
+/// - Listing/loading/deleting are handled by Messages (`RefreshHexGrids`, `LoadHexGridById`, `DeleteHexGridById`).
 pub fn view(gui: &ToolsGui) -> Element<'_, Message> {
     let header = column![
         text("Hex Grid Editor").size(22),
-        text("Pointy-top hexes. Left-click selects/creates. Right-click deletes.").size(14),
+        text("Pointy-top hexes. Left-click drag paints. Right-click deletes. Middle-drag pans.")
+            .size(14),
     ]
     .spacing(6);
 
     let controls = row![
+        column![
+            text("Name").size(14),
+            text_input("My Hex Grid", &gui.hex_grid_name)
+                .on_input(Message::HexGridNameChanged)
+                .padding(8),
+        ]
+        .spacing(6)
+        .width(Length::Fixed(220.0)),
         column![
             text("Width").size(14),
             text_input("9", &gui.hex_grid_width)
@@ -39,22 +48,34 @@ pub fn view(gui: &ToolsGui) -> Element<'_, Message> {
         .spacing(6)
         .width(Length::Fixed(140.0)),
         button("Apply resize").on_press(Message::HexGridApplyResize),
+        button("Save grid").on_press(Message::SaveHexGrid),
+        button("Create new grid").on_press(Message::CreateNewHexGrid),
+        button("Refresh list").on_press(Message::RefreshHexGrids),
         iced::widget::Space::with_width(Length::Fill),
     ]
     .spacing(12)
     .align_items(Alignment::End);
 
-    // The canvas itself should be the scroll surface. Keep the overall view non-scrollable.
+    // Main editing area:
+    // - Left: the canvas (should keep as much space as possible)
+    // - Right: the list sidebar (scrollable) + tile editor
     let grid = hex_grid_canvas(gui);
     let editor = selected_tile_editor(gui);
+    let list = existing_hex_grids_list(gui);
+
+    let right_sidebar = column![editor, horizontal_rule(1), list,]
+        .spacing(12)
+        .width(Length::Fixed(380.0))
+        .height(Length::Fill);
 
     column![
         header,
         horizontal_rule(1),
         controls,
-        row![grid, editor].spacing(16),
+        row![grid, right_sidebar].spacing(16).height(Length::Fill),
     ]
     .spacing(12)
+    .height(Length::Fill)
     .into()
 }
 
@@ -64,6 +85,55 @@ fn parse_dim(s: &str) -> Option<i32> {
         return None;
     }
     t.parse::<i32>().ok().filter(|v| *v > 0)
+}
+
+fn existing_hex_grids_list(gui: &ToolsGui) -> Element<'_, Message> {
+    let mut col = column![
+        text("Saved Hex Grids").size(18),
+        text("Load a grid to edit it in the canvas.").size(13),
+    ]
+    .spacing(8);
+
+    if gui.hex_grids.is_empty() {
+        col = col.push(text("No saved hex grids yet.").size(13));
+        return container(col).padding(12).into();
+    }
+
+    for HexGridRow {
+        id,
+        name,
+        width,
+        height,
+    } in gui.hex_grids.iter().cloned()
+    {
+        let is_active = gui.hex_grid_id == Some(id);
+
+        let row_ui = row![
+            text(format!("#{id}")).size(13),
+            text(format!("{name} ({width}x{height})"))
+                .size(13)
+                .width(Length::Fill),
+            if is_active {
+                button("Editing").padding(6)
+            } else {
+                button("Load")
+                    .padding(6)
+                    .on_press(Message::LoadHexGridById(id))
+            },
+            button("Delete")
+                .padding(6)
+                .on_press(Message::DeleteHexGridById(id)),
+        ]
+        .spacing(10)
+        .align_items(Alignment::Center);
+
+        col = col.push(row_ui);
+    }
+
+    // Scrollable list that doesn't take space from the canvas (lives in the fixed-width sidebar).
+    scrollable(container(col).padding(12))
+        .height(Length::Fill)
+        .into()
 }
 
 fn hex_grid_canvas(gui: &ToolsGui) -> Element<'_, Message> {
