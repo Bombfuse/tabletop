@@ -1,0 +1,21 @@
+[package]
+name = "simulator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# UI framework
+iced = { version = "0.12", features = ["wgpu", "tokio"] }
+
+# Data access (SQLite + card APIs)
+data = { path = "../data" }
+
+# Common workspace deps (optional but handy)
+anyhow.workspace = true
+
+[profile.dev]
+# Keep UI iteration snappy
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
