@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rusqlite::OptionalExtension;
+pub mod cards;
 
 fn main() -> eframe::Result<()> {
     // On startup, ensure we have a sqlite database in the repository root (../tabletop)
