@@ -1,17 +1,13 @@
-use std::path::{Path, PathBuf};
+mod views;
+
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use iced::alignment;
-use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, horizontal_rule, row, text};
 use iced::{Application, Command, Element, Length, Settings, Subscription, Theme};
 
 use crate::app;
 
-/// Run the GUI application.
-///
-/// Note: the GUI currently opens the DB and performs queries synchronously on the UI thread.
-/// For small local DBs this is usually fine. If you notice stutters when listing many rows,
-/// we can move DB work onto a background task.
 pub fn run() -> iced::Result {
     let settings = Settings {
         window: iced::window::Settings {
@@ -25,13 +21,13 @@ pub fn run() -> iced::Result {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
+pub enum Tab {
     Units,
     Items,
 }
 
 impl Tab {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tab::Units => "Units",
             Tab::Items => "Items",
@@ -40,7 +36,7 @@ impl Tab {
 }
 
 #[derive(Debug, Clone)]
-enum Message {
+pub enum Message {
     Tick,
     SwitchTab(Tab),
 
@@ -68,43 +64,44 @@ enum Message {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UnitRow {
-    name: String,
-    strength: i64,
-    focus: i64,
-    intelligence: i64,
-    agility: i64,
-    knowledge: i64,
+pub struct UnitRow {
+    pub name: String,
+    pub strength: i64,
+    pub focus: i64,
+    pub intelligence: i64,
+    pub agility: i64,
+    pub knowledge: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ItemRow {
-    name: String,
+pub struct ItemRow {
+    pub name: String,
 }
 
-struct ToolsGui {
-    tab: Tab,
+pub struct ToolsGui {
+    pub tab: Tab,
 
-    tabletop_dir: PathBuf,
-    db_path: PathBuf,
-    migrations_dir: PathBuf,
+    pub tabletop_dir: PathBuf,
+    pub db_path: PathBuf,
+    pub migrations_dir: PathBuf,
 
-    // form state
-    unit_name: String,
-    unit_strength: String,
-    unit_focus: String,
-    unit_intelligence: String,
-    unit_agility: String,
-    unit_knowledge: String,
+    // Units form
+    pub unit_name: String,
+    pub unit_strength: String,
+    pub unit_focus: String,
+    pub unit_intelligence: String,
+    pub unit_agility: String,
+    pub unit_knowledge: String,
 
-    item_name: String,
+    // Items form
+    pub item_name: String,
 
     // loaded data
-    units: Vec<UnitRow>,
-    items: Vec<ItemRow>,
+    pub units: Vec<UnitRow>,
+    pub items: Vec<ItemRow>,
 
     // ui state
-    status: Option<String>,
+    pub status: Option<String>,
 }
 
 impl Default for ToolsGui {
@@ -160,8 +157,6 @@ impl Application for ToolsGui {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        // A light periodic tick can be used for future enhancements (auto-refresh, etc.).
-        // For now it's effectively unused other than being available.
         iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::Tick)
     }
 
@@ -211,7 +206,6 @@ impl Application for ToolsGui {
                 } else {
                     self.status = Some("Unit created".to_string());
                     self.unit_name.clear();
-                    // keep stat inputs as-is
                 }
                 Command::perform(async {}, |_| Message::Refresh)
             }
@@ -257,35 +251,24 @@ impl Application for ToolsGui {
 
     fn view(&self) -> Element<'_, Self::Message> {
         let header = row![
-            text("Tabletop Tools")
-                .size(28)
-                .horizontal_alignment(alignment::Horizontal::Left),
+            text("Tabletop Tools").size(28),
             iced::widget::Space::with_width(Length::Fill),
             button("Refresh").on_press(Message::Refresh),
         ]
         .spacing(12);
 
         let tabs = row![
-            tab_button(self.tab, Tab::Units),
-            tab_button(self.tab, Tab::Items),
+            views::tab_button(self.tab, Tab::Units),
+            views::tab_button(self.tab, Tab::Items),
             iced::widget::Space::with_width(Length::Fill),
         ]
         .spacing(8);
 
-        let status = if let Some(s) = &self.status {
-            row![
-                text(s.clone()).size(14),
-                iced::widget::Space::with_width(Length::Fill),
-                button("Dismiss").on_press(Message::ClearStatus)
-            ]
-            .spacing(12)
-        } else {
-            row![text("")] // keep layout stable
-        };
+        let status = views::status_bar(self.status.as_deref());
 
         let content = match self.tab {
-            Tab::Units => self.view_units_tab(),
-            Tab::Items => self.view_items_tab(),
+            Tab::Units => views::units::view(self),
+            Tab::Items => views::items::view(self),
         };
 
         container(
@@ -304,15 +287,6 @@ impl Application for ToolsGui {
         .height(Length::Fill)
         .into()
     }
-}
-
-fn tab_button(current: Tab, tab: Tab) -> iced::widget::Button<'static, Message> {
-    let label = tab.label();
-    let mut b = button(label);
-    if current != tab {
-        b = b.on_press(Message::SwitchTab(tab));
-    }
-    b
 }
 
 impl ToolsGui {
@@ -359,8 +333,8 @@ impl ToolsGui {
     fn refresh_lists(&mut self) -> Result<()> {
         let conn = self.open_conn()?;
 
-        self.units = list_units(&conn)?;
-        self.items = list_items(&conn)?;
+        self.units = views::units::list_units(&conn)?;
+        self.items = views::items::list_items(&conn)?;
 
         Ok(())
     }
@@ -411,185 +385,5 @@ impl ToolsGui {
         let conn = self.open_conn()?;
         let _ = app::cards::item::delete_card(&conn, name)?;
         Ok(())
-    }
-
-    fn view_units_tab(&self) -> Element<'_, Message> {
-        let form = column![
-            text("Create Unit").size(18),
-            row![
-                labeled_input("Name", &self.unit_name, Message::UnitNameChanged),
-                iced::widget::Space::with_width(Length::Fill),
-            ]
-            .spacing(12),
-            row![
-                labeled_input(
-                    "Strength",
-                    &self.unit_strength,
-                    Message::UnitStrengthChanged
-                ),
-                labeled_input("Focus", &self.unit_focus, Message::UnitFocusChanged),
-                labeled_input(
-                    "Intelligence",
-                    &self.unit_intelligence,
-                    Message::UnitIntelligenceChanged
-                ),
-            ]
-            .spacing(12),
-            row![
-                labeled_input("Agility", &self.unit_agility, Message::UnitAgilityChanged),
-                labeled_input(
-                    "Knowledge",
-                    &self.unit_knowledge,
-                    Message::UnitKnowledgeChanged
-                ),
-                iced::widget::Space::with_width(Length::Fill),
-            ]
-            .spacing(12),
-            row![button("Create").on_press(Message::CreateUnit)].spacing(12),
-        ]
-        .spacing(10);
-
-        let list_header = row![
-            text("Units").size(18),
-            iced::widget::Space::with_width(Length::Fill),
-            text(format!("{} total", self.units.len())).size(14),
-        ];
-
-        let mut list_col = column![list_header].spacing(8);
-
-        for u in &self.units {
-            let stats = format!(
-                "STR {}  FOC {}  INT {}  AGI {}  KNO {}",
-                u.strength, u.focus, u.intelligence, u.agility, u.knowledge
-            );
-
-            let row_el = row![
-                column![text(u.name.clone()).size(16), text(stats).size(12)].spacing(2),
-                iced::widget::Space::with_width(Length::Fill),
-                button("Delete").on_press(Message::DeleteUnit(u.name.clone())),
-            ]
-            .spacing(12);
-
-            list_col = list_col.push(container(row_el).padding(8));
-        }
-
-        let list = scrollable(list_col).height(Length::Fill);
-
-        column![form, horizontal_rule(1), list]
-            .spacing(12)
-            .height(Length::Fill)
-            .into()
-    }
-
-    fn view_items_tab(&self) -> Element<'_, Message> {
-        let form = column![
-            text("Create Item").size(18),
-            row![
-                labeled_input("Name", &self.item_name, Message::ItemNameChanged),
-                iced::widget::Space::with_width(Length::Fill),
-            ]
-            .spacing(12),
-            row![button("Create").on_press(Message::CreateItem)].spacing(12),
-        ]
-        .spacing(10);
-
-        let list_header = row![
-            text("Items").size(18),
-            iced::widget::Space::with_width(Length::Fill),
-            text(format!("{} total", self.items.len())).size(14),
-        ];
-
-        let mut list_col = column![list_header].spacing(8);
-
-        for it in &self.items {
-            let row_el = row![
-                text(it.name.clone()).size(16),
-                iced::widget::Space::with_width(Length::Fill),
-                button("Delete").on_press(Message::DeleteItem(it.name.clone())),
-            ]
-            .spacing(12);
-
-            list_col = list_col.push(container(row_el).padding(8));
-        }
-
-        let list = scrollable(list_col).height(Length::Fill);
-
-        column![form, horizontal_rule(1), list]
-            .spacing(12)
-            .height(Length::Fill)
-            .into()
-    }
-}
-
-fn labeled_input<'a>(
-    label: &'static str,
-    value: &'a str,
-    on_change: fn(String) -> Message,
-) -> Element<'a, Message> {
-    // iced's TextInput requires placeholders; we use the label as placeholder for simplicity.
-    // The label text is rendered above the input to be explicit.
-    column![
-        text(label).size(12),
-        text_input(label, value)
-            .on_input(on_change)
-            .padding(8)
-            .width(Length::Fixed(220.0)),
-    ]
-    .spacing(4)
-    .into()
-}
-
-fn list_units(conn: &rusqlite::Connection) -> Result<Vec<UnitRow>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT name, strength, focus, intelligence, agility, knowledge
-        FROM units
-        ORDER BY name ASC
-        "#,
-    )?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok(UnitRow {
-            name: row.get(0)?,
-            strength: row.get(1)?,
-            focus: row.get(2)?,
-            intelligence: row.get(3)?,
-            agility: row.get(4)?,
-            knowledge: row.get(5)?,
-        })
-    })?;
-
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-fn list_items(conn: &rusqlite::Connection) -> Result<Vec<ItemRow>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT name
-        FROM items
-        ORDER BY name ASC
-        "#,
-    )?;
-
-    let rows = stmt.query_map([], |row| Ok(ItemRow { name: row.get(0)? }))?;
-
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-// Small helper so we can keep referencing app::paths without exposing file paths here.
-mod _path_helpers {
-    use super::*;
-
-    #[allow(dead_code)]
-    pub fn display_path(p: &Path) -> String {
-        p.display().to_string()
     }
 }
