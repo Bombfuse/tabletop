@@ -1,3 +1,4 @@
+mod cards;
 mod cli;
 mod db;
 mod migrations;
@@ -31,5 +32,65 @@ pub fn run() -> Result<()> {
         )
     })?;
 
+    if let Some(cmd) = args.command {
+        handle_command(&conn, cmd)?;
+    }
+
     Ok(())
+}
+
+fn handle_command(conn: &rusqlite::Connection, cmd: cli::Command) -> Result<()> {
+    match cmd {
+        cli::Command::Unit { command } => match command {
+            cli::UnitCommand::Save {
+                name,
+                strength,
+                focus,
+                intelligence,
+                agility,
+                knowledge,
+            } => {
+                let unit = cards::unit::Unit {
+                    name,
+                    strength,
+                    focus,
+                    intelligence,
+                    agility,
+                    knowledge,
+                };
+                let saved = cards::unit::save_card(conn, &unit)?;
+                println!("{saved:?}");
+                Ok(())
+            }
+            cli::UnitCommand::Get { name } => {
+                let got = cards::unit::get_card(conn, &name)?;
+                println!("{got:?}");
+                Ok(())
+            }
+            cli::UnitCommand::List => {
+                anyhow::bail!(
+                    "unit list is not implemented after refactor (no list API in cards::unit)"
+                );
+            }
+        },
+
+        cli::Command::Item { command } => match command {
+            cli::ItemCommand::Save { name } => {
+                let item = cards::item::Item { name };
+                let saved = cards::item::save_card(conn, &item)?;
+                println!("{saved:?}");
+                Ok(())
+            }
+            cli::ItemCommand::Get { name } => {
+                let got = cards::item::get_card(conn, &name)?;
+                println!("{got:?}");
+                Ok(())
+            }
+            cli::ItemCommand::List => {
+                anyhow::bail!(
+                    "item list is not implemented after refactor (no list API in cards::item)"
+                );
+            }
+        },
+    }
 }
