@@ -15,6 +15,10 @@ impl ActionType {
         }
     }
 
+    fn to_db(self) -> &'static str {
+        self.as_str()
+    }
+
     fn parse(s: &str) -> Result<Self> {
         match s {
             "Interaction" => Ok(ActionType::Interaction),
@@ -30,6 +34,215 @@ pub struct Action {
     pub action_point_cost: i64,
     pub action_type: ActionType,
     pub text: String,
+}
+
+/// Optional association for an Action.
+///
+/// At most one association should be present at a time. The DB schema enforces
+/// this (see migration) and these APIs assume the same invariant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionAssociation {
+    Unit { unit_name: String },
+    Item { item_name: String },
+    Level { level_name: String },
+}
+
+fn get_unit_id(conn: &Connection, unit_name: &str) -> Result<i64> {
+    let unit_name = crate::shared::require_non_empty_trimmed("unit_name", unit_name)?;
+    conn.query_row(
+        "SELECT id FROM units WHERE name = ?1",
+        params![unit_name],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("Failed to resolve Unit `{unit_name}` id"))
+}
+
+fn get_item_id(conn: &Connection, item_name: &str) -> Result<i64> {
+    let item_name = crate::shared::require_non_empty_trimmed("item_name", item_name)?;
+    conn.query_row(
+        "SELECT id FROM items WHERE name = ?1",
+        params![item_name],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("Failed to resolve Item `{item_name}` id"))
+}
+
+fn get_level_id(conn: &Connection, level_name: &str) -> Result<i64> {
+    let level_name = crate::shared::require_non_empty_trimmed("level_name", level_name)?;
+    conn.query_row(
+        "SELECT id FROM levels WHERE name = ?1",
+        params![level_name],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("Failed to resolve Level `{level_name}` id"))
+}
+
+/// Clears any Unit/Item/Level association for the given action.
+pub fn clear_association(conn: &Connection, action_name: &str) -> Result<()> {
+    let action_name = crate::shared::require_non_empty_trimmed("action_name", action_name)?;
+
+    let changed = conn
+        .execute(
+            r#"
+            UPDATE actions
+            SET unit_id = NULL,
+                item_id = NULL,
+                level_id = NULL
+            WHERE name = ?1
+            "#,
+            params![action_name],
+        )
+        .with_context(|| format!("Failed to clear association for action `{action_name}`"))?;
+
+    if changed == 0 {
+        anyhow::bail!("Action `{action_name}` not found");
+    }
+
+    Ok(())
+}
+
+/// Sets the action association to exactly one of Unit/Item/Level (and clears the others).
+pub fn set_association(
+    conn: &Connection,
+    action_name: &str,
+    association: &ActionAssociation,
+) -> Result<()> {
+    let action_name = crate::shared::require_non_empty_trimmed("action_name", action_name)?;
+
+    match association {
+        ActionAssociation::Unit { unit_name } => {
+            let unit_id = get_unit_id(conn, unit_name)?;
+            let changed = conn
+                .execute(
+                    r#"
+                    UPDATE actions
+                    SET unit_id = ?2,
+                        item_id = NULL,
+                        level_id = NULL
+                    WHERE name = ?1
+                    "#,
+                    params![action_name, unit_id],
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to link action `{action_name}` to unit `{}`",
+                        unit_name.trim()
+                    )
+                })?;
+            if changed == 0 {
+                anyhow::bail!("Action `{action_name}` not found");
+            }
+            Ok(())
+        }
+        ActionAssociation::Item { item_name } => {
+            let item_id = get_item_id(conn, item_name)?;
+            let changed = conn
+                .execute(
+                    r#"
+                    UPDATE actions
+                    SET item_id = ?2,
+                        unit_id = NULL,
+                        level_id = NULL
+                    WHERE name = ?1
+                    "#,
+                    params![action_name, item_id],
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to link action `{action_name}` to item `{}`",
+                        item_name.trim()
+                    )
+                })?;
+            if changed == 0 {
+                anyhow::bail!("Action `{action_name}` not found");
+            }
+            Ok(())
+        }
+        ActionAssociation::Level { level_name } => {
+            let level_id = get_level_id(conn, level_name)?;
+            let changed = conn
+                .execute(
+                    r#"
+                    UPDATE actions
+                    SET level_id = ?2,
+                        unit_id = NULL,
+                        item_id = NULL
+                    WHERE name = ?1
+                    "#,
+                    params![action_name, level_id],
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to link action `{action_name}` to level `{}`",
+                        level_name.trim()
+                    )
+                })?;
+            if changed == 0 {
+                anyhow::bail!("Action `{action_name}` not found");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Returns the association (if any) for a given action.
+///
+/// If the DB has no association columns (older schema), this will error when queried.
+pub fn get_association(conn: &Connection, action_name: &str) -> Result<Option<ActionAssociation>> {
+    let action_name = action_name.trim();
+    if action_name.is_empty() {
+        return Ok(None);
+    }
+
+    let assoc: Option<ActionAssociation> = conn
+        .query_row(
+            r#"
+            SELECT
+                u.name,
+                i.name,
+                l.name
+            FROM actions a
+            LEFT JOIN units  u ON u.id = a.unit_id
+            LEFT JOIN items  i ON i.id = a.item_id
+            LEFT JOIN levels l ON l.id = a.level_id
+            WHERE a.name = ?1
+            "#,
+            params![action_name],
+            |row| {
+                let unit_name: Option<String> = row.get(0)?;
+                let item_name: Option<String> = row.get(1)?;
+                let level_name: Option<String> = row.get(2)?;
+
+                let assoc = match (unit_name, item_name, level_name) {
+                    (Some(unit_name), None, None) => Some(ActionAssociation::Unit { unit_name }),
+                    (None, Some(item_name), None) => Some(ActionAssociation::Item { item_name }),
+                    (None, None, Some(level_name)) => Some(ActionAssociation::Level { level_name }),
+                    (None, None, None) => None,
+                    _ => {
+                        // This should be impossible if DB constraints/triggers are in place.
+                        // Convert to a rusqlite-compatible error type for the row-mapper closure.
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
+                                    "Invalid action association state for `{}` (multiple links set)",
+                                    action_name
+                                ),
+                            )),
+                        ));
+                    }
+                };
+
+                Ok(assoc)
+            },
+        )
+        .optional()
+        .with_context(|| format!("Failed to fetch association for action `{}`", action_name))?
+        .flatten();
+
+    Ok(assoc)
 }
 
 /// Lists actions ordered by name (ascending).
@@ -86,7 +299,7 @@ pub fn save_card(conn: &Connection, card: &Action) -> Result<Action> {
         params![
             card.name,
             card.action_point_cost,
-            card.action_type.as_str(),
+            card.action_type.to_db(),
             card.text
         ],
     )
@@ -94,6 +307,25 @@ pub fn save_card(conn: &Connection, card: &Action) -> Result<Action> {
 
     get_card(conn, &card.name)?
         .with_context(|| format!("Action `{}` was saved but could not be reloaded", card.name))
+}
+
+/// Inserts a new action with an optional association to a Unit/Item/Level.
+///
+/// This is a convenience wrapper around `save_card` + `set_association`.
+pub fn save_card_with_association(
+    conn: &Connection,
+    card: &Action,
+    association: Option<&ActionAssociation>,
+) -> Result<Action> {
+    let saved = save_card(conn, card)?;
+    if let Some(assoc) = association {
+        set_association(conn, &saved.name, assoc)?;
+    }
+
+    match get_card(conn, &saved.name)? {
+        Some(a) => Ok(a),
+        None => anyhow::bail!("Action `{}` disappeared after save", saved.name),
+    }
 }
 
 /// Updates an existing action (by name).
@@ -115,7 +347,7 @@ pub fn update_card(conn: &Connection, card: &Action) -> Result<Option<Action>> {
             params![
                 card.name,
                 card.action_point_cost,
-                card.action_type.as_str(),
+                card.action_type.to_db(),
                 card.text
             ],
         )
@@ -123,6 +355,25 @@ pub fn update_card(conn: &Connection, card: &Action) -> Result<Option<Action>> {
 
     if changed == 0 {
         return Ok(None);
+    }
+
+    get_card(conn, &card.name)
+}
+
+/// Updates an existing action and sets/clears its association.
+pub fn update_card_with_association(
+    conn: &Connection,
+    card: &Action,
+    association: Option<&ActionAssociation>,
+) -> Result<Option<Action>> {
+    let updated = update_card(conn, card)?;
+    if updated.is_none() {
+        return Ok(None);
+    }
+
+    match association {
+        Some(assoc) => set_association(conn, &card.name, assoc)?,
+        None => clear_association(conn, &card.name)?,
     }
 
     get_card(conn, &card.name)
@@ -162,7 +413,7 @@ pub fn rename_and_update_card(
                 old_name,
                 card.name,
                 card.action_point_cost,
-                card.action_type.as_str(),
+                card.action_type.to_db(),
                 card.text
             ],
         )
@@ -247,19 +498,133 @@ mod tests {
     fn create_schema(conn: &Connection) {
         conn.execute_batch(
             r#"
+            CREATE TABLE units (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL UNIQUE,
+                strength      INTEGER NOT NULL,
+                focus         INTEGER NOT NULL,
+                intelligence  INTEGER NOT NULL,
+                agility       INTEGER NOT NULL,
+                knowledge     INTEGER NOT NULL,
+                created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                CHECK (length(trim(name)) > 0)
+            );
+
+            CREATE TABLE items (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL UNIQUE,
+                created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                CHECK (length(trim(name)) > 0)
+            );
+
+            CREATE TABLE levels (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL UNIQUE,
+                text          TEXT NOT NULL,
+                created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                CHECK (length(trim(name)) > 0),
+                CHECK (length(trim(text)) > 0)
+            );
+
             CREATE TABLE actions (
                 id                 INTEGER PRIMARY KEY AUTOINCREMENT,
                 name               TEXT NOT NULL UNIQUE,
                 action_point_cost  INTEGER NOT NULL,
                 action_type        TEXT NOT NULL,
                 text               TEXT NOT NULL,
+
+                -- Optional association
+                unit_id            INTEGER NULL,
+                item_id            INTEGER NULL,
+                level_id           INTEGER NULL,
+
                 created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
                 CHECK (length(trim(name)) > 0),
                 CHECK (length(trim(text)) > 0),
                 CHECK (action_point_cost >= 0),
                 CHECK (action_type IN ('Interaction', 'Attack'))
             );
+
+            -- Enforce "one action per card" (allow many NULLs)
+            CREATE UNIQUE INDEX uq_actions_unit_id ON actions(unit_id) WHERE unit_id IS NOT NULL;
+            CREATE UNIQUE INDEX uq_actions_item_id ON actions(item_id) WHERE item_id IS NOT NULL;
+            CREATE UNIQUE INDEX uq_actions_level_id ON actions(level_id) WHERE level_id IS NOT NULL;
+
+            -- Enforce "at most one association" and validate referenced rows exist.
+            CREATE TRIGGER trg_actions_validate_action_links_insert
+            BEFORE INSERT ON actions
+            FOR EACH ROW
+            BEGIN
+                SELECT
+                    CASE
+                        WHEN
+                            (NEW.unit_id IS NOT NULL AND (NEW.item_id IS NOT NULL OR NEW.level_id IS NOT NULL))
+                            OR (NEW.item_id IS NOT NULL AND NEW.level_id IS NOT NULL)
+                        THEN
+                            RAISE(ABORT, 'actions may be linked to at most one of unit_id, item_id, level_id')
+                    END;
+
+                SELECT
+                    CASE
+                        WHEN NEW.unit_id IS NOT NULL
+                             AND (SELECT id FROM units WHERE id = NEW.unit_id) IS NULL
+                        THEN RAISE(ABORT, 'actions.unit_id references missing units.id')
+                    END;
+
+                SELECT
+                    CASE
+                        WHEN NEW.item_id IS NOT NULL
+                             AND (SELECT id FROM items WHERE id = NEW.item_id) IS NULL
+                        THEN RAISE(ABORT, 'actions.item_id references missing items.id')
+                    END;
+
+                SELECT
+                    CASE
+                        WHEN NEW.level_id IS NOT NULL
+                             AND (SELECT id FROM levels WHERE id = NEW.level_id) IS NULL
+                        THEN RAISE(ABORT, 'actions.level_id references missing levels.id')
+                    END;
+            END;
+
+            CREATE TRIGGER trg_actions_validate_action_links_update
+            BEFORE UPDATE OF unit_id, item_id, level_id ON actions
+            FOR EACH ROW
+            BEGIN
+                SELECT
+                    CASE
+                        WHEN
+                            (NEW.unit_id IS NOT NULL AND (NEW.item_id IS NOT NULL OR NEW.level_id IS NOT NULL))
+                            OR (NEW.item_id IS NOT NULL AND NEW.level_id IS NOT NULL)
+                        THEN
+                            RAISE(ABORT, 'actions may be linked to at most one of unit_id, item_id, level_id')
+                    END;
+
+                SELECT
+                    CASE
+                        WHEN NEW.unit_id IS NOT NULL
+                             AND (SELECT id FROM units WHERE id = NEW.unit_id) IS NULL
+                        THEN RAISE(ABORT, 'actions.unit_id references missing units.id')
+                    END;
+
+                SELECT
+                    CASE
+                        WHEN NEW.item_id IS NOT NULL
+                             AND (SELECT id FROM items WHERE id = NEW.item_id) IS NULL
+                        THEN RAISE(ABORT, 'actions.item_id references missing items.id')
+                    END;
+
+                SELECT
+                    CASE
+                        WHEN NEW.level_id IS NOT NULL
+                             AND (SELECT id FROM levels WHERE id = NEW.level_id) IS NULL
+                        THEN RAISE(ABORT, 'actions.level_id references missing levels.id')
+                    END;
+            END;
             "#,
         )
         .expect("create actions schema");

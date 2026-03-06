@@ -56,6 +56,12 @@ pub(crate) fn create_schema(conn: &Connection) {
             action_type        TEXT NOT NULL,
             text               TEXT NOT NULL,
 
+            -- Optional association: an action can belong to at most one of:
+            -- - a unit, item, or level (enforced by triggers below)
+            unit_id            INTEGER NULL,
+            item_id            INTEGER NULL,
+            level_id           INTEGER NULL,
+
             created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 
@@ -64,6 +70,82 @@ pub(crate) fn create_schema(conn: &Connection) {
             CHECK (action_point_cost >= 0),
             CHECK (action_type IN ('Interaction', 'Attack'))
         );
+
+        -- Enforce "one action per card" (allow many NULLs)
+        CREATE UNIQUE INDEX uq_actions_unit_id ON actions(unit_id) WHERE unit_id IS NOT NULL;
+        CREATE UNIQUE INDEX uq_actions_item_id ON actions(item_id) WHERE item_id IS NOT NULL;
+        CREATE UNIQUE INDEX uq_actions_level_id ON actions(level_id) WHERE level_id IS NOT NULL;
+
+        -- Validate links and enforce "at most one of unit_id/item_id/level_id".
+        CREATE TRIGGER trg_actions_validate_action_links_insert
+        BEFORE INSERT ON actions
+        FOR EACH ROW
+        BEGIN
+            SELECT
+                CASE
+                    WHEN
+                        (NEW.unit_id IS NOT NULL AND (NEW.item_id IS NOT NULL OR NEW.level_id IS NOT NULL))
+                        OR (NEW.item_id IS NOT NULL AND NEW.level_id IS NOT NULL)
+                    THEN
+                        RAISE(ABORT, 'actions may be linked to at most one of unit_id, item_id, level_id')
+                END;
+
+            SELECT
+                CASE
+                    WHEN NEW.unit_id IS NOT NULL
+                         AND (SELECT id FROM units WHERE id = NEW.unit_id) IS NULL
+                    THEN RAISE(ABORT, 'actions.unit_id references missing units.id')
+                END;
+
+            SELECT
+                CASE
+                    WHEN NEW.item_id IS NOT NULL
+                         AND (SELECT id FROM items WHERE id = NEW.item_id) IS NULL
+                    THEN RAISE(ABORT, 'actions.item_id references missing items.id')
+                END;
+
+            SELECT
+                CASE
+                    WHEN NEW.level_id IS NOT NULL
+                         AND (SELECT id FROM levels WHERE id = NEW.level_id) IS NULL
+                    THEN RAISE(ABORT, 'actions.level_id references missing levels.id')
+                END;
+        END;
+
+        CREATE TRIGGER trg_actions_validate_action_links_update
+        BEFORE UPDATE OF unit_id, item_id, level_id ON actions
+        FOR EACH ROW
+        BEGIN
+            SELECT
+                CASE
+                    WHEN
+                        (NEW.unit_id IS NOT NULL AND (NEW.item_id IS NOT NULL OR NEW.level_id IS NOT NULL))
+                        OR (NEW.item_id IS NOT NULL AND NEW.level_id IS NOT NULL)
+                    THEN
+                        RAISE(ABORT, 'actions may be linked to at most one of unit_id, item_id, level_id')
+                END;
+
+            SELECT
+                CASE
+                    WHEN NEW.unit_id IS NOT NULL
+                         AND (SELECT id FROM units WHERE id = NEW.unit_id) IS NULL
+                    THEN RAISE(ABORT, 'actions.unit_id references missing units.id')
+                END;
+
+            SELECT
+                CASE
+                    WHEN NEW.item_id IS NOT NULL
+                         AND (SELECT id FROM items WHERE id = NEW.item_id) IS NULL
+                    THEN RAISE(ABORT, 'actions.item_id references missing items.id')
+                END;
+
+            SELECT
+                CASE
+                    WHEN NEW.level_id IS NOT NULL
+                         AND (SELECT id FROM levels WHERE id = NEW.level_id) IS NULL
+                    THEN RAISE(ABORT, 'actions.level_id references missing levels.id')
+                END;
+        END;
 
         CREATE TABLE attacks (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +184,28 @@ pub(crate) fn create_schema(conn: &Connection) {
             CHECK (target IS NULL OR target BETWEEN 1 AND 14),
             CHECK (skill IN ('Strength', 'Focus', 'Intelligence', 'Knowledge', 'Agility'))
         );
+
+        -- Emulate ON DELETE SET NULL by clearing links when a card is deleted.
+        CREATE TRIGGER trg_units_delete_clear_actions
+        AFTER DELETE ON units
+        FOR EACH ROW
+        BEGIN
+            UPDATE actions SET unit_id = NULL WHERE unit_id = OLD.id;
+        END;
+
+        CREATE TRIGGER trg_items_delete_clear_actions
+        AFTER DELETE ON items
+        FOR EACH ROW
+        BEGIN
+            UPDATE actions SET item_id = NULL WHERE item_id = OLD.id;
+        END;
+
+        CREATE TRIGGER trg_levels_delete_clear_actions
+        AFTER DELETE ON levels
+        FOR EACH ROW
+        BEGIN
+            UPDATE actions SET level_id = NULL WHERE level_id = OLD.id;
+        END;
         "#,
     )
     .expect("create test schema");

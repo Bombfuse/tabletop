@@ -1,8 +1,21 @@
 use anyhow::Result;
-use iced::widget::{button, column, container, horizontal_rule, row, text, text_input};
-use iced::{Element, Length};
+use iced::widget::{button, column, container, horizontal_rule, pick_list, row, text, text_input};
+use iced::{Alignment, Element, Length};
 
 use crate::gui::{Message, ToolsGui, UnitRow};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActionNameChoice(String);
+
+impl std::fmt::Display for ActionNameChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn normalize_for_match(s: &str) -> String {
+    s.trim().to_lowercase()
+}
 
 pub fn view(app: &ToolsGui) -> Element<'_, Message> {
     let form = column![
@@ -78,7 +91,73 @@ pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, M
     ]
     .spacing(12);
 
+    // Editable association: pick an Action name (auto-complete-ish via pick list),
+    // then explicitly Save/Clear.
+    //
+    // We filter choices using whatever the user has typed into the association box.
+    // This approximates an "autocomplete dropdown" without a dedicated widget.
+    let filter = normalize_for_match(&app.unit_assoc_action_name);
+
+    let mut action_choices: Vec<ActionNameChoice> = app
+        .actions
+        .iter()
+        .map(|a| a.name.clone())
+        .filter(|name| {
+            if filter.is_empty() {
+                true
+            } else {
+                normalize_for_match(name).contains(&filter)
+            }
+        })
+        .map(ActionNameChoice)
+        .collect();
+    action_choices.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Current selection from the Unit edit buffer.
+    let selected_action = {
+        let trimmed = app.unit_assoc_action_name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(ActionNameChoice(trimmed.to_string()))
+        }
+    };
+
+    let assoc_row = row![
+        text("Associated Action").width(Length::Fixed(140.0)),
+        pick_list(
+            action_choices,
+            selected_action,
+            |choice: ActionNameChoice| { Message::UnitAssocActionNameChanged(choice.0) }
+        )
+        .placeholder("(none)")
+        .width(Length::Fixed(320.0)),
+        button("Save").on_press(Message::SaveUnitAssociation),
+        button("Clear").on_press(Message::ClearUnitAssociation),
+        iced::widget::Space::with_width(Length::Fill),
+    ]
+    .spacing(12)
+    .align_items(Alignment::Center);
+
+    // Also keep a text box for quick filtering/typing (useful when the pick list is long).
+    // The pick-list choices above are filtered using this value.
+    let assoc_filter_row = row![
+        text("Filter").width(Length::Fixed(140.0)),
+        text_input(
+            "type to filter / exact action name",
+            &app.unit_assoc_action_name
+        )
+        .on_input(Message::UnitAssocActionNameChanged)
+        .padding(8)
+        .width(Length::Fixed(320.0)),
+        iced::widget::Space::with_width(Length::Fill),
+    ]
+    .spacing(12)
+    .align_items(Alignment::Center);
+
     let form = column![
+        assoc_row,
+        assoc_filter_row,
         row![
             labeled_input("Name", &app.unit_name, Message::UnitNameChanged),
             iced::widget::Space::with_width(Length::Fill),

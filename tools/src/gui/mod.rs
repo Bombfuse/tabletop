@@ -8,6 +8,14 @@ use iced::{Application, Command, Element, Length, Settings, Subscription, Theme}
 
 use crate::app;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionAssociationKind {
+    None,
+    Unit,
+    Item,
+    Level,
+}
+
 pub fn run() -> iced::Result {
     let settings = Settings {
         window: iced::window::Settings {
@@ -78,7 +86,19 @@ pub enum Message {
     ActionPointCostChanged(String),
     ActionTypeChanged(String),
     ActionTextChanged(String),
+
     CreateAction,
+
+    // Optional associations set from Unit/Item/Level edit views
+    UnitAssocActionNameChanged(String),
+    ItemAssocActionNameChanged(String),
+    LevelAssocActionNameChanged(String),
+    SaveUnitAssociation,
+    ClearUnitAssociation,
+    SaveItemAssociation,
+    ClearItemAssociation,
+    SaveLevelAssociation,
+    ClearLevelAssociation,
 
     // Attack subform (used for create + edit when ActionType = Attack)
     AttackDamageChanged(String),
@@ -146,6 +166,11 @@ pub struct ActionRow {
     pub action_point_cost: i64,
     pub action_type: String,
     pub text: String,
+
+    // Optional association (exactly one of these should be Some at a time, or all None).
+    pub unit_name: Option<String>,
+    pub item_name: Option<String>,
+    pub level_name: Option<String>,
 }
 
 pub struct ToolsGui {
@@ -163,12 +188,21 @@ pub struct ToolsGui {
     pub unit_agility: String,
     pub unit_knowledge: String,
 
+    // Unit -> Action association buffer (set from Unit edit view)
+    pub unit_assoc_action_name: String,
+
     // Items form / edit buffer
     pub item_name: String,
+
+    // Item -> Action association buffer (set from Item edit view)
+    pub item_assoc_action_name: String,
 
     // Levels form / edit buffer
     pub level_name: String,
     pub level_text: String,
+
+    // Level -> Action association buffer (set from Level edit view)
+    pub level_assoc_action_name: String,
 
     // Actions form / edit buffer
     pub action_name: String,
@@ -222,11 +256,14 @@ impl Default for ToolsGui {
             unit_intelligence: "0".to_string(),
             unit_agility: "0".to_string(),
             unit_knowledge: "0".to_string(),
+            unit_assoc_action_name: String::new(),
 
             item_name: String::new(),
+            item_assoc_action_name: String::new(),
 
             level_name: String::new(),
             level_text: String::new(),
+            level_assoc_action_name: String::new(),
 
             action_name: String::new(),
             action_point_cost: "0".to_string(),
@@ -338,6 +375,29 @@ impl Application for ToolsGui {
                 Command::perform(async {}, |_| Message::Refresh)
             }
 
+            Message::UnitAssocActionNameChanged(v) => {
+                self.unit_assoc_action_name = v;
+                Command::none()
+            }
+            Message::SaveUnitAssociation => {
+                if let Err(e) = self.save_unit_association() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Unit association saved".to_string());
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+            Message::ClearUnitAssociation => {
+                if let Err(e) = self.clear_unit_association() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Unit association cleared".to_string());
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+
             Message::ItemNameChanged(v) => {
                 self.item_name = v;
                 Command::none()
@@ -350,6 +410,29 @@ impl Application for ToolsGui {
                     self.item_name.clear();
                 }
                 Command::perform(async {}, |_| Message::Refresh)
+            }
+
+            Message::ItemAssocActionNameChanged(v) => {
+                self.item_assoc_action_name = v;
+                Command::none()
+            }
+            Message::SaveItemAssociation => {
+                if let Err(e) = self.save_item_association() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Item association saved".to_string());
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+            Message::ClearItemAssociation => {
+                if let Err(e) = self.clear_item_association() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Item association cleared".to_string());
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
             }
 
             Message::LevelNameChanged(v) => {
@@ -369,6 +452,29 @@ impl Application for ToolsGui {
                     self.level_text.clear();
                 }
                 Command::perform(async {}, |_| Message::Refresh)
+            }
+
+            Message::LevelAssocActionNameChanged(v) => {
+                self.level_assoc_action_name = v;
+                Command::none()
+            }
+            Message::SaveLevelAssociation => {
+                if let Err(e) = self.save_level_association() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Level association saved".to_string());
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+            Message::ClearLevelAssociation => {
+                if let Err(e) = self.clear_level_association() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Level association cleared".to_string());
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
             }
 
             Message::ActionNameChanged(v) => {
@@ -795,7 +901,7 @@ impl ToolsGui {
             text,
         };
 
-        // Treat Action + subtype as one entity during creation.
+        // Treat Action + subtype (+ optional association) as one entity during creation.
         // 1) Create the Action row.
         app::cards::action::save_card(&conn, &action)?;
 
@@ -901,6 +1007,17 @@ impl ToolsGui {
         self.unit_agility = u.agility.to_string();
         self.unit_knowledge = u.knowledge.to_string();
 
+        // Pre-fill association buffer with currently-linked action name (if any).
+        //
+        // We use the already-loaded `self.actions` list (refreshed via `Message::Refresh`)
+        // rather than hitting the DB again here.
+        self.unit_assoc_action_name = self
+            .actions
+            .iter()
+            .find(|a| a.unit_name.as_deref() == Some(u.name.as_str()))
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+
         self.active_view = ActiveView::EditUnit {
             original_name: u.name,
         };
@@ -913,6 +1030,17 @@ impl ToolsGui {
             .with_context(|| format!("Item `{name}` not found"))?;
 
         self.item_name = it.name.clone();
+
+        // Pre-fill association buffer with currently-linked action name (if any).
+        //
+        // We use the already-loaded `self.actions` list (refreshed via `Message::Refresh`)
+        // rather than hitting the DB again here.
+        self.item_assoc_action_name = self
+            .actions
+            .iter()
+            .find(|a| a.item_name.as_deref() == Some(it.name.as_str()))
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
 
         self.active_view = ActiveView::EditItem {
             original_name: it.name,
@@ -927,6 +1055,17 @@ impl ToolsGui {
 
         self.level_name = lv.name.clone();
         self.level_text = lv.text.clone();
+
+        // Pre-fill association buffer with currently-linked action name (if any).
+        //
+        // We use the already-loaded `self.actions` list (refreshed via `Message::Refresh`)
+        // rather than hitting the DB again here.
+        self.level_assoc_action_name = self
+            .actions
+            .iter()
+            .find(|a| a.level_name.as_deref() == Some(lv.name.as_str()))
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
 
         self.active_view = ActiveView::EditLevel {
             original_name: lv.name,
@@ -1093,7 +1232,7 @@ impl ToolsGui {
         }
 
         let action = app::cards::action::Action {
-            name: new_name,
+            name: new_name.clone(),
             action_point_cost,
             action_type,
             text,
@@ -1115,6 +1254,134 @@ impl ToolsGui {
             .parse()
             .with_context(|| format!("{label} must be an integer"))?;
         Ok(Some(v))
+    }
+
+    fn save_unit_association(&self) -> Result<()> {
+        let ActiveView::EditUnit { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing a unit");
+        };
+
+        let conn = self.open_conn()?;
+
+        let action_name = self.unit_assoc_action_name.trim();
+        if action_name.is_empty() {
+            anyhow::bail!("Select an Action (or use Clear) to associate with this Unit");
+        }
+
+        app::cards::action::set_association(
+            &conn,
+            action_name,
+            &app::cards::action::ActionAssociation::Unit {
+                unit_name: original_name.clone(),
+            },
+        )?;
+
+        Ok(())
+    }
+
+    fn clear_unit_association(&self) -> Result<()> {
+        let ActiveView::EditUnit { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing a unit");
+        };
+
+        let conn = self.open_conn()?;
+
+        // Find any action currently linked to this unit and clear it.
+        // (No-op if none.)
+        for a in app::cards::action::list_cards(&conn)? {
+            if matches!(
+                app::cards::action::get_association(&conn, &a.name)?,
+                Some(app::cards::action::ActionAssociation::Unit { unit_name }) if unit_name == *original_name
+            ) {
+                let _ = app::cards::action::clear_association(&conn, &a.name);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn save_item_association(&self) -> Result<()> {
+        let ActiveView::EditItem { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing an item");
+        };
+
+        let conn = self.open_conn()?;
+
+        let action_name = self.item_assoc_action_name.trim();
+        if action_name.is_empty() {
+            anyhow::bail!("Select an Action (or use Clear) to associate with this Item");
+        }
+
+        app::cards::action::set_association(
+            &conn,
+            action_name,
+            &app::cards::action::ActionAssociation::Item {
+                item_name: original_name.clone(),
+            },
+        )?;
+
+        Ok(())
+    }
+
+    fn clear_item_association(&self) -> Result<()> {
+        let ActiveView::EditItem { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing an item");
+        };
+
+        let conn = self.open_conn()?;
+
+        for a in app::cards::action::list_cards(&conn)? {
+            if matches!(
+                app::cards::action::get_association(&conn, &a.name)?,
+                Some(app::cards::action::ActionAssociation::Item { item_name }) if item_name == *original_name
+            ) {
+                let _ = app::cards::action::clear_association(&conn, &a.name);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn save_level_association(&self) -> Result<()> {
+        let ActiveView::EditLevel { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing a level");
+        };
+
+        let conn = self.open_conn()?;
+
+        let action_name = self.level_assoc_action_name.trim();
+        if action_name.is_empty() {
+            anyhow::bail!("Select an Action (or use Clear) to associate with this Level");
+        }
+
+        app::cards::action::set_association(
+            &conn,
+            action_name,
+            &app::cards::action::ActionAssociation::Level {
+                level_name: original_name.clone(),
+            },
+        )?;
+
+        Ok(())
+    }
+
+    fn clear_level_association(&self) -> Result<()> {
+        let ActiveView::EditLevel { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing a level");
+        };
+
+        let conn = self.open_conn()?;
+
+        for a in app::cards::action::list_cards(&conn)? {
+            if matches!(
+                app::cards::action::get_association(&conn, &a.name)?,
+                Some(app::cards::action::ActionAssociation::Level { level_name }) if level_name == *original_name
+            ) {
+                let _ = app::cards::action::clear_association(&conn, &a.name);
+            }
+        }
+
+        Ok(())
     }
 
     fn current_action_name_for_subforms(&self) -> Result<&str> {

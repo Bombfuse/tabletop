@@ -122,9 +122,31 @@ impl std::fmt::Display for ActionTypeChoice {
 
 pub fn list_actions(conn: &Connection) -> Result<Vec<ActionRow>> {
     let actions = app::cards::action::list_cards(conn).context("list actions")?;
-    Ok(actions
-        .into_iter()
-        .map(|a| ActionRow {
+
+    let mut out: Vec<ActionRow> = Vec::with_capacity(actions.len());
+
+    for a in actions {
+        // Best-effort: older DBs might not have association columns yet.
+        // If so, just surface "no association" rather than failing the whole list.
+        let assoc = match app::cards::action::get_association(conn, &a.name) {
+            Ok(v) => v,
+            Err(_) => None,
+        };
+
+        let (unit_name, item_name, level_name) = match assoc {
+            Some(app::cards::action::ActionAssociation::Unit { unit_name }) => {
+                (Some(unit_name), None, None)
+            }
+            Some(app::cards::action::ActionAssociation::Item { item_name }) => {
+                (None, Some(item_name), None)
+            }
+            Some(app::cards::action::ActionAssociation::Level { level_name }) => {
+                (None, None, Some(level_name))
+            }
+            None => (None, None, None),
+        };
+
+        out.push(ActionRow {
             name: a.name,
             action_point_cost: a.action_point_cost,
             action_type: match a.action_type {
@@ -132,8 +154,13 @@ pub fn list_actions(conn: &Connection) -> Result<Vec<ActionRow>> {
                 app::cards::action::ActionType::Attack => "Attack".to_string(),
             },
             text: a.text,
-        })
-        .collect())
+            unit_name,
+            item_name,
+            level_name,
+        });
+    }
+
+    Ok(out)
 }
 
 pub fn view(app_state: &ToolsGui) -> Element<'_, Message> {
@@ -333,7 +360,21 @@ fn actions_list_view(app_state: &ToolsGui) -> Element<'_, Message> {
         .spacing(12)
         .align_items(Alignment::Center);
 
+        let assoc = if let Some(unit_name) = a.unit_name.as_deref() {
+            format!("Associated: Unit — {unit_name}")
+        } else if let Some(item_name) = a.item_name.as_deref() {
+            format!("Associated: Item — {item_name}")
+        } else if let Some(level_name) = a.level_name.as_deref() {
+            format!("Associated: Level — {level_name}")
+        } else {
+            "Associated: (none)".to_string()
+        };
+
         let line2 = row![text(&a.text).size(14)]
+            .spacing(12)
+            .align_items(Alignment::Center);
+
+        let line3 = row![text(assoc).size(12)]
             .spacing(12)
             .align_items(Alignment::Center);
 
@@ -345,7 +386,7 @@ fn actions_list_view(app_state: &ToolsGui) -> Element<'_, Message> {
         .align_items(Alignment::Center);
 
         rows = rows.push(
-            container(column![line1, line2, controls].spacing(6))
+            container(column![line1, line2, line3, controls].spacing(6))
                 .padding(10)
                 .width(Length::Fill),
         );
