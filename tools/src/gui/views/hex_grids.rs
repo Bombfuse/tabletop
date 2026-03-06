@@ -63,10 +63,12 @@ pub fn view(gui: &ToolsGui) -> Element<'_, Message> {
     let editor = selected_tile_editor(gui);
     let list = existing_hex_grids_list(gui);
 
-    let right_sidebar = column![editor, horizontal_rule(1), list,]
-        .spacing(12)
-        .width(Length::Fixed(380.0))
-        .height(Length::Fill);
+    // Only the right sidebar should scroll, so the canvas stays stable and interactive.
+    let right_sidebar = scrollable(container(
+        column![editor, horizontal_rule(1), list].spacing(12),
+    ))
+    .height(Length::Fill)
+    .width(Length::Fixed(380.0));
 
     column![
         header,
@@ -211,6 +213,79 @@ fn selected_tile_editor(gui: &ToolsGui) -> Element<'_, Message> {
 
     let present = gui.hex_grid_tiles_present.contains(&(x, y));
 
+    // Autocomplete-like suggestions for Unit/Item/Level by name.
+    // This is implemented as:
+    // - a text_input for the query
+    // - a short list of matching buttons beneath it
+    // Clicking a suggestion "picks" that name (Message::HexTilePick*ByName).
+    let unit_query = gui.hex_tile_unit_query.trim();
+    let item_query = gui.hex_tile_item_query.trim();
+    let level_query = gui.hex_tile_level_query.trim();
+
+    let unit_suggestions: Vec<String> = gui
+        .units
+        .iter()
+        .filter(|u| crate::gui::contains_case_insensitive(&u.name, unit_query))
+        .take(8)
+        .map(|u| u.name.clone())
+        .collect();
+
+    let item_suggestions: Vec<String> = gui
+        .items
+        .iter()
+        .filter(|i| crate::gui::contains_case_insensitive(&i.name, item_query))
+        .take(8)
+        .map(|i| i.name.clone())
+        .collect();
+
+    let level_suggestions: Vec<String> = gui
+        .levels
+        .iter()
+        .filter(|l| crate::gui::contains_case_insensitive(&l.name, level_query))
+        .take(8)
+        .map(|l| l.name.clone())
+        .collect();
+
+    let mut unit_suggestions_col = column![].spacing(6);
+    for name in unit_suggestions {
+        unit_suggestions_col = unit_suggestions_col.push(
+            button(text(name.clone()))
+                .padding(6)
+                .on_press(Message::HexTilePickUnitByName(name)),
+        );
+    }
+
+    let mut item_suggestions_col = column![].spacing(6);
+    for name in item_suggestions {
+        item_suggestions_col = item_suggestions_col.push(
+            button(text(name.clone()))
+                .padding(6)
+                .on_press(Message::HexTilePickItemByName(name)),
+        );
+    }
+
+    let mut level_suggestions_col = column![].spacing(6);
+    for name in level_suggestions {
+        level_suggestions_col = level_suggestions_col.push(
+            button(text(name.clone()))
+                .padding(6)
+                .on_press(Message::HexTilePickLevelByName(name)),
+        );
+    }
+
+    let resolved_unit = gui
+        .hex_tile_unit_id
+        .map(|id| format!("{id}"))
+        .unwrap_or_else(|| "—".to_string());
+    let resolved_item = gui
+        .hex_tile_item_id
+        .map(|id| format!("{id}"))
+        .unwrap_or_else(|| "—".to_string());
+    let resolved_level = gui
+        .hex_tile_level_id
+        .map(|id| format!("{id}"))
+        .unwrap_or_else(|| "—".to_string());
+
     let body = column![
         text(format!("Selected: ({x},{y})")).size(14),
         text(format!("Present: {}", if present { "yes" } else { "no" })).size(14),
@@ -219,6 +294,39 @@ fn selected_tile_editor(gui: &ToolsGui) -> Element<'_, Message> {
             button("Delete tile").on_press(Message::HexGridTileClear(x, y)),
         ]
         .spacing(12),
+        horizontal_rule(1),
+        text("Associations (optional)").size(14),
+        text("Unit").size(13),
+        text_input("Type unit name…", &gui.hex_tile_unit_query)
+            .on_input(Message::HexTileUnitQueryChanged)
+            .padding(8),
+        unit_suggestions_col,
+        text(format!("Resolved UnitId: {resolved_unit}")).size(12),
+        horizontal_rule(1),
+        text("Item").size(13),
+        text_input("Type item name…", &gui.hex_tile_item_query)
+            .on_input(Message::HexTileItemQueryChanged)
+            .padding(8),
+        item_suggestions_col,
+        text(format!("Resolved ItemId: {resolved_item}")).size(12),
+        horizontal_rule(1),
+        text("Level").size(13),
+        text_input("Type level name…", &gui.hex_tile_level_query)
+            .on_input(Message::HexTileLevelQueryChanged)
+            .padding(8),
+        level_suggestions_col,
+        text(format!("Resolved LevelId: {resolved_level}")).size(12),
+        horizontal_rule(1),
+        text("Type (fallback)").size(13),
+        text_input("Item | Experience | Unit", &gui.hex_tile_type)
+            .on_input(Message::HexTileTypeChanged)
+            .padding(8),
+        row![
+            button("Save associations").on_press(Message::SaveHexTileAssociations),
+            button("Clear").on_press(Message::ClearHexTileAssociations),
+        ]
+        .spacing(12),
+        text("If no ids are set, Type can be used to draw a random card of that type.").size(12),
     ]
     .spacing(10);
 

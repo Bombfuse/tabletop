@@ -37,6 +37,15 @@ impl HexCoord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HexTile {
     pub coord: HexCoord,
+
+    // Optional associations / metadata
+    pub unit_id: Option<i64>,
+    pub item_id: Option<i64>,
+    pub level_id: Option<i64>,
+
+    /// Stringly-typed tile type. Expected values: "Item", "Experience", "Unit".
+    /// If no ids are specified, this can be used to pull a random card of this type.
+    pub tile_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,8 +142,8 @@ impl HexGrid {
 
         conn.execute(
             r#"
-            INSERT INTO hex_tiles (hex_grid_id, x, y)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO hex_tiles (hex_grid_id, x, y, unit_id, item_id, level_id, type)
+            VALUES (?1, ?2, ?3, NULL, NULL, NULL, NULL)
             ON CONFLICT(hex_grid_id, x, y)
             DO UPDATE SET
                 updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -166,7 +175,7 @@ impl HexGrid {
         let tile = conn
             .query_row(
                 r#"
-                SELECT x, y
+                SELECT x, y, unit_id, item_id, level_id, type
                 FROM hex_tiles
                 WHERE hex_grid_id = ?1 AND x = ?2 AND y = ?3
                 "#,
@@ -174,6 +183,10 @@ impl HexGrid {
                 |r| {
                     Ok(HexTile {
                         coord: HexCoord::new(r.get::<_, i32>(0)?, r.get::<_, i32>(1)?),
+                        unit_id: r.get::<_, Option<i64>>(2)?,
+                        item_id: r.get::<_, Option<i64>>(3)?,
+                        level_id: r.get::<_, Option<i64>>(4)?,
+                        tile_type: r.get::<_, Option<String>>(5)?,
                     })
                 },
             )
@@ -187,7 +200,7 @@ impl HexGrid {
 
         let mut stmt = conn.prepare(
             r#"
-            SELECT x, y
+            SELECT x, y, unit_id, item_id, level_id, type
             FROM hex_tiles
             WHERE hex_grid_id = ?1
             ORDER BY y ASC, x ASC
@@ -199,6 +212,10 @@ impl HexGrid {
         while let Some(r) = rows.next()? {
             out.push(HexTile {
                 coord: HexCoord::new(r.get::<_, i32>(0)?, r.get::<_, i32>(1)?),
+                unit_id: r.get::<_, Option<i64>>(2)?,
+                item_id: r.get::<_, Option<i64>>(3)?,
+                level_id: r.get::<_, Option<i64>>(4)?,
+                tile_type: r.get::<_, Option<String>>(5)?,
             });
         }
         Ok(out)
@@ -250,6 +267,12 @@ mod tests {
                 hex_grid_id    INTEGER NOT NULL,
                 x              INTEGER NOT NULL,
                 y              INTEGER NOT NULL,
+
+                -- Optional associations / metadata
+                unit_id        INTEGER NULL,
+                item_id        INTEGER NULL,
+                level_id       INTEGER NULL,
+                type           TEXT NULL,
 
                 created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

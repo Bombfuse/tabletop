@@ -1,6 +1,28 @@
 mod shared;
 mod views;
 
+fn parse_optional_i64_from_input(label: &str, s: &str) -> anyhow::Result<Option<i64>> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let v: i64 = t
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{label} must be an integer (or empty): {e}"))?;
+    Ok(Some(v))
+}
+
+pub fn normalize_for_match(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
+pub fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.trim().is_empty() {
+        return true;
+    }
+    normalize_for_match(haystack).contains(&normalize_for_match(needle))
+}
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -86,6 +108,19 @@ pub enum Message {
     HexGridApplyResize,
     HexGridTileClicked(i32, i32),
     HexGridTileClear(i32, i32),
+
+    // Hex tile associations (selected tile editor)
+    HexTileUnitQueryChanged(String),
+    HexTileItemQueryChanged(String),
+    HexTileLevelQueryChanged(String),
+
+    HexTilePickUnitByName(String),
+    HexTilePickItemByName(String),
+    HexTilePickLevelByName(String),
+
+    HexTileTypeChanged(String),
+    SaveHexTileAssociations,
+    ClearHexTileAssociations,
 
     // Armor modifiers form (single "draft" row editor)
     ArmorModifierValueChanged(String),
@@ -313,6 +348,25 @@ pub struct ToolsGui {
     pub hex_grid_selected_x: Option<i32>,
     pub hex_grid_selected_y: Option<i32>,
 
+    // Selected tile association editor buffers (UI-only; persisted on SaveHexTileAssociations)
+    //
+    // "Friendly" inputs: user types a name query; picks a match; we resolve to the card id.
+    pub hex_tile_unit_query: String,
+    pub hex_tile_item_query: String,
+    pub hex_tile_level_query: String,
+
+    // Resolved ids (derived from picked name; displayed in UI elsewhere)
+    pub hex_tile_unit_id: Option<i64>,
+    pub hex_tile_item_id: Option<i64>,
+    pub hex_tile_level_id: Option<i64>,
+
+    // The chosen names (for display). These are best-effort and may not be present if loaded by id only.
+    pub hex_tile_unit_name: Option<String>,
+    pub hex_tile_item_name: Option<String>,
+    pub hex_tile_level_name: Option<String>,
+
+    pub hex_tile_type: String,
+
     // Tile presence only: coordinates that currently contain a tile
     pub hex_grid_tiles_present: BTreeSet<(i32, i32)>,
 
@@ -400,6 +454,21 @@ impl Default for ToolsGui {
 
             hex_grid_selected_x: None,
             hex_grid_selected_y: None,
+
+            hex_tile_unit_query: "".to_string(),
+            hex_tile_item_query: "".to_string(),
+            hex_tile_level_query: "".to_string(),
+
+            hex_tile_unit_id: None,
+            hex_tile_item_id: None,
+            hex_tile_level_id: None,
+
+            hex_tile_unit_name: None,
+            hex_tile_item_name: None,
+            hex_tile_level_name: None,
+
+            hex_tile_type: "".to_string(),
+
             hex_grid_tiles_present: (|| {
                 let mut s = BTreeSet::new();
                 for y in 0..9_i32 {
@@ -500,6 +569,21 @@ impl Application for ToolsGui {
                 // Clear selection buffers
                 self.hex_grid_selected_x = None;
                 self.hex_grid_selected_y = None;
+
+                // Clear selected-tile association editor buffers
+                self.hex_tile_unit_query.clear();
+                self.hex_tile_item_query.clear();
+                self.hex_tile_level_query.clear();
+
+                self.hex_tile_unit_id = None;
+                self.hex_tile_item_id = None;
+                self.hex_tile_level_id = None;
+
+                self.hex_tile_unit_name = None;
+                self.hex_tile_item_name = None;
+                self.hex_tile_level_name = None;
+
+                self.hex_tile_type.clear();
 
                 Command::none()
             }
@@ -621,6 +705,47 @@ impl Application for ToolsGui {
                 // Left-clicking an empty coordinate creates a tile (presence-only).
                 self.hex_grid_tiles_present.insert((x, y));
 
+                // Load associations for this tile into the editor buffers (best-effort).
+                if let Some(grid_id) = self.hex_grid_id {
+                    if let Ok(conn) = self.open_conn() {
+                        let row: rusqlite::Result<(
+                            Option<i64>,
+                            Option<i64>,
+                            Option<i64>,
+                            Option<String>,
+                        )> = conn.query_row(
+                            r#"
+                                SELECT unit_id, item_id, level_id, type
+                                FROM hex_tiles
+                                WHERE hex_grid_id = ?1 AND x = ?2 AND y = ?3
+                                "#,
+                            rusqlite::params![grid_id, x, y],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        );
+
+                        match row {
+                            Ok((unit_id, item_id, level_id, tile_type)) => {
+                                self.hex_tile_unit_id = unit_id;
+                                self.hex_tile_item_id = item_id;
+                                self.hex_tile_level_id = level_id;
+
+                                self.hex_tile_unit_name = None;
+                                self.hex_tile_item_name = None;
+                                self.hex_tile_level_name = None;
+
+                                self.hex_tile_unit_query.clear();
+                                self.hex_tile_item_query.clear();
+                                self.hex_tile_level_query.clear();
+
+                                self.hex_tile_type = tile_type.unwrap_or_default();
+                            }
+                            Err(_) => {
+                                // Tile might not exist yet (unsaved/new). Keep buffers as-is.
+                            }
+                        }
+                    }
+                }
+
                 Command::none()
             }
             Message::HexGridTileClear(x, y) => {
@@ -630,9 +755,229 @@ impl Application for ToolsGui {
                 if self.hex_grid_selected_x == Some(x) && self.hex_grid_selected_y == Some(y) {
                     self.hex_grid_selected_x = None;
                     self.hex_grid_selected_y = None;
+
+                    // Clear selected-tile association editor buffers
+                    self.hex_tile_unit_query.clear();
+                    self.hex_tile_item_query.clear();
+                    self.hex_tile_level_query.clear();
+
+                    self.hex_tile_unit_id = None;
+                    self.hex_tile_item_id = None;
+                    self.hex_tile_level_id = None;
+
+                    self.hex_tile_unit_name = None;
+                    self.hex_tile_item_name = None;
+                    self.hex_tile_level_name = None;
+
+                    self.hex_tile_type.clear();
                 }
 
                 Command::none()
+            }
+
+            Message::HexTileUnitQueryChanged(v) => {
+                self.hex_tile_unit_query = v;
+                Command::none()
+            }
+            Message::HexTileItemQueryChanged(v) => {
+                self.hex_tile_item_query = v;
+                Command::none()
+            }
+            Message::HexTileLevelQueryChanged(v) => {
+                self.hex_tile_level_query = v;
+                Command::none()
+            }
+
+            Message::HexTilePickUnitByName(name) => {
+                let picked = self
+                    .units
+                    .iter()
+                    .find(|u| u.name == name)
+                    .map(|u| u.name.clone());
+                if let Some(picked) = picked {
+                    // NOTE: we resolve id at save time via DB lookup by name.
+                    self.hex_tile_unit_name = Some(picked.clone());
+                    self.hex_tile_unit_query = picked;
+                }
+                Command::none()
+            }
+            Message::HexTilePickItemByName(name) => {
+                let picked = self
+                    .items
+                    .iter()
+                    .find(|i| i.name == name)
+                    .map(|i| i.name.clone());
+                if let Some(picked) = picked {
+                    self.hex_tile_item_name = Some(picked.clone());
+                    self.hex_tile_item_query = picked;
+                }
+                Command::none()
+            }
+            Message::HexTilePickLevelByName(name) => {
+                let picked = self
+                    .levels
+                    .iter()
+                    .find(|l| l.name == name)
+                    .map(|l| l.name.clone());
+                if let Some(picked) = picked {
+                    self.hex_tile_level_name = Some(picked.clone());
+                    self.hex_tile_level_query = picked;
+                }
+                Command::none()
+            }
+
+            Message::HexTileTypeChanged(v) => {
+                self.hex_tile_type = v;
+                Command::none()
+            }
+            Message::ClearHexTileAssociations => {
+                self.hex_tile_unit_query.clear();
+                self.hex_tile_item_query.clear();
+                self.hex_tile_level_query.clear();
+
+                self.hex_tile_unit_id = None;
+                self.hex_tile_item_id = None;
+                self.hex_tile_level_id = None;
+
+                self.hex_tile_unit_name = None;
+                self.hex_tile_item_name = None;
+                self.hex_tile_level_name = None;
+
+                self.hex_tile_type.clear();
+                Command::none()
+            }
+            Message::SaveHexTileAssociations => {
+                let Some(grid_id) = self.hex_grid_id else {
+                    self.status = Some("Save the hex grid first (no grid id yet)".to_string());
+                    return Command::none();
+                };
+                let (Some(x), Some(y)) = (self.hex_grid_selected_x, self.hex_grid_selected_y)
+                else {
+                    self.status = Some("Select a tile first".to_string());
+                    return Command::none();
+                };
+
+                // Ensure tile exists (presence-only) before associating.
+                self.hex_grid_tiles_present.insert((x, y));
+
+                let tile_type = {
+                    let t = self.hex_tile_type.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                };
+
+                match self.open_conn() {
+                    Ok(mut conn) => {
+                        let tx = match conn.transaction() {
+                            Ok(tx) => tx,
+                            Err(e) => {
+                                self.status = Some(format!("{e:#}"));
+                                return Command::none();
+                            }
+                        };
+
+                        // Resolve ids by name query (exact match on canonical name).
+                        // Empty query => NULL
+                        let unit_id: Option<i64> = {
+                            let q = self.hex_tile_unit_query.trim();
+                            if q.is_empty() {
+                                None
+                            } else {
+                                tx.query_row(
+                                    r#"SELECT id FROM units WHERE name = ?1"#,
+                                    rusqlite::params![q],
+                                    |r| r.get(0),
+                                )
+                                .optional()
+                                .map_err(|e| anyhow::anyhow!("{e}"))
+                                .unwrap_or(None)
+                            }
+                        };
+
+                        let item_id: Option<i64> = {
+                            let q = self.hex_tile_item_query.trim();
+                            if q.is_empty() {
+                                None
+                            } else {
+                                tx.query_row(
+                                    r#"SELECT id FROM items WHERE name = ?1"#,
+                                    rusqlite::params![q],
+                                    |r| r.get(0),
+                                )
+                                .optional()
+                                .map_err(|e| anyhow::anyhow!("{e}"))
+                                .unwrap_or(None)
+                            }
+                        };
+
+                        let level_id: Option<i64> = {
+                            let q = self.hex_tile_level_query.trim();
+                            if q.is_empty() {
+                                None
+                            } else {
+                                tx.query_row(
+                                    r#"SELECT id FROM levels WHERE name = ?1"#,
+                                    rusqlite::params![q],
+                                    |r| r.get(0),
+                                )
+                                .optional()
+                                .map_err(|e| anyhow::anyhow!("{e}"))
+                                .unwrap_or(None)
+                            }
+                        };
+
+                        // Ensure row exists
+                        if let Err(e) = tx.execute(
+                            r#"
+                            INSERT INTO hex_tiles (hex_grid_id, x, y)
+                            VALUES (?1, ?2, ?3)
+                            ON CONFLICT(hex_grid_id, x, y)
+                            DO UPDATE SET
+                                updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                            "#,
+                            rusqlite::params![grid_id, x, y],
+                        ) {
+                            self.status = Some(format!("{e:#}"));
+                            return Command::none();
+                        }
+
+                        if let Err(e) = tx.execute(
+                            r#"
+                            UPDATE hex_tiles
+                            SET unit_id = ?1,
+                                item_id = ?2,
+                                level_id = ?3,
+                                type = ?4,
+                                updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                            WHERE hex_grid_id = ?5 AND x = ?6 AND y = ?7
+                            "#,
+                            rusqlite::params![unit_id, item_id, level_id, tile_type, grid_id, x, y],
+                        ) {
+                            self.status = Some(format!("{e:#}"));
+                            return Command::none();
+                        }
+
+                        if let Err(e) = tx.commit() {
+                            self.status = Some(format!("{e:#}"));
+                            return Command::none();
+                        }
+
+                        // Cache resolved ids in UI state
+                        self.hex_tile_unit_id = unit_id;
+                        self.hex_tile_item_id = item_id;
+                        self.hex_tile_level_id = level_id;
+
+                        self.status = Some("Hex tile associations saved".to_string());
+                        Command::none()
+                    }
+                    Err(e) => {
+                        self.status = Some(format!("{e:#}"));
+                        Command::none()
+                    }
+                }
             }
 
             Message::ArmorModifierValueChanged(v) => {
@@ -1525,6 +1870,21 @@ impl ToolsGui {
         // Clear selection buffers
         self.hex_grid_selected_x = None;
         self.hex_grid_selected_y = None;
+
+        // Clear selected-tile association editor buffers
+        self.hex_tile_unit_query.clear();
+        self.hex_tile_item_query.clear();
+        self.hex_tile_level_query.clear();
+
+        self.hex_tile_unit_id = None;
+        self.hex_tile_item_id = None;
+        self.hex_tile_level_id = None;
+
+        self.hex_tile_unit_name = None;
+        self.hex_tile_item_name = None;
+        self.hex_tile_level_name = None;
+
+        self.hex_tile_type.clear();
 
         Ok(())
     }

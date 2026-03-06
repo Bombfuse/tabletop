@@ -457,6 +457,12 @@ CREATE TABLE IF NOT EXISTS hex_tiles (
     x           INTEGER NOT NULL,
     y           INTEGER NOT NULL,
 
+    -- Optional associations / metadata
+    unit_id     INTEGER NULL,
+    item_id     INTEGER NULL,
+    level_id    INTEGER NULL,
+    type        TEXT NULL,
+
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 
