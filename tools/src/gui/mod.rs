@@ -123,11 +123,18 @@ pub struct ToolsGui {
 
 impl Default for ToolsGui {
     fn default() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Robust defaults regardless of working directory:
+        // - Prefer a directory at/above `cwd` that contains `migrations/` (workspace root).
+        // - Fall back to `cwd` if none is found.
+        let tabletop_dir = app::paths::default_tabletop_dir(&cwd).unwrap_or(cwd);
+
         Self {
             tab: Tab::Units,
 
-            // Match CLI defaults: tabletop_dir="..", db_path="tabletop.sqlite3", migrations_dir="migrations"
-            tabletop_dir: PathBuf::from(".."),
+            // Defaults are resolved under `tabletop_dir` (see `resolve_paths`).
+            tabletop_dir,
             db_path: PathBuf::from("tabletop.sqlite3"),
             migrations_dir: PathBuf::from("migrations"),
 
@@ -156,13 +163,10 @@ impl Application for ToolsGui {
     type Flags = ();
 
     fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
-        let mut app = Self::default();
+        let app = Self::default();
 
-        // Best-effort: init schema + apply migrations before first refresh.
-        if let Err(e) = app.ensure_db_ready() {
-            app.status = Some(format!("DB init failed: {e:#}"));
-        }
-
+        // Run DB init/migrations as part of the startup refresh so it also runs
+        // on any explicit refresh cycle.
         (app, Command::perform(async {}, |_| Message::Refresh))
     }
 
@@ -189,6 +193,13 @@ impl Application for ToolsGui {
             }
 
             Message::Refresh => {
+                // Ensure schema + migrations are applied on every refresh cycle,
+                // including the first startup refresh.
+                if let Err(e) = self.ensure_db_ready() {
+                    self.status = Some(format!("DB init failed: {e:#}"));
+                    return Command::none();
+                }
+
                 if let Err(e) = self.refresh_lists() {
                     self.status = Some(format!("{e:#}"));
                 }
@@ -363,11 +374,24 @@ impl Application for ToolsGui {
 
 impl ToolsGui {
     fn resolve_paths(&self) -> Result<(PathBuf, PathBuf, PathBuf)> {
+        // Robust path resolution regardless of the process working directory:
+        // - If `tabletop_dir` is absolute, use it as-is.
+        // - If `tabletop_dir` is relative, interpret it relative to a discovered workspace root
+        //   (a directory at/above the current working directory that contains `migrations/`).
         let tabletop_dir = app::paths::normalize_dir(&self.tabletop_dir)
             .with_context(|| format!("Invalid tabletop dir: {}", self.tabletop_dir.display()))?;
 
-        let db_path = app::paths::resolve_under(&tabletop_dir, &self.db_path)?;
-        let migrations_dir = app::paths::resolve_under(&tabletop_dir, &self.migrations_dir)?;
+        let db_path = app::paths::resolve_under_workspace_root(&tabletop_dir, &self.db_path)
+            .with_context(|| format!("Invalid db path: {}", self.db_path.display()))?;
+
+        let migrations_dir =
+            app::paths::resolve_under_workspace_root(&tabletop_dir, &self.migrations_dir)
+                .with_context(|| {
+                    format!(
+                        "Invalid migrations dir path: {}",
+                        self.migrations_dir.display()
+                    )
+                })?;
 
         Ok((tabletop_dir, db_path, migrations_dir))
     }
@@ -398,6 +422,11 @@ impl ToolsGui {
     }
 
     fn open_conn(&self) -> Result<rusqlite::Connection> {
+        // Ensure schema + migrations are applied before returning a connection.
+        // This prevents "no such table units" if any code path opens a connection
+        // without going through `Message::Refresh` first.
+        self.ensure_db_ready()?;
+
         let (_tabletop_dir, db_path, _migrations_dir) = self.resolve_paths()?;
         app::db::open_db(&db_path).with_context(|| format!("open db: {}", db_path.display()))
     }

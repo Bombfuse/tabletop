@@ -11,6 +11,39 @@ pub struct Unit {
     pub knowledge: i64,
 }
 
+/// Lists units ordered by name (ascending).
+pub fn list_cards(conn: &Connection) -> Result<Vec<Unit>> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT name, strength, focus, intelligence, agility, knowledge
+            FROM units
+            ORDER BY name ASC
+            "#,
+        )
+        .with_context(|| "Failed to prepare list units query")?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(Unit {
+                name: row.get(0)?,
+                strength: row.get(1)?,
+                focus: row.get(2)?,
+                intelligence: row.get(3)?,
+                agility: row.get(4)?,
+                knowledge: row.get(5)?,
+            })
+        })
+        .with_context(|| "Failed to query units")?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.with_context(|| "Failed to read unit row")?);
+    }
+
+    Ok(out)
+}
+
 /// Inserts a new unit.
 ///
 /// If a unit with the same name already exists, this will return an error

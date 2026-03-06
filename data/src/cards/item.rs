@@ -1,9 +1,33 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub name: String,
+}
+
+/// Lists items ordered by name (ascending).
+pub fn list_cards(conn: &Connection) -> Result<Vec<Item>> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT name
+            FROM items
+            ORDER BY name ASC
+            "#,
+        )
+        .with_context(|| "Failed to prepare list items query")?;
+
+    let rows = stmt
+        .query_map([], |row| Ok(Item { name: row.get(0)? }))
+        .with_context(|| "Failed to query items")?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.with_context(|| "Failed to read item row")?);
+    }
+
+    Ok(out)
 }
 
 /// Inserts a new item.

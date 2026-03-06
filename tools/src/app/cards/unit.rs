@@ -3,6 +3,13 @@ use rusqlite::Connection;
 
 pub use data::cards::unit::Unit;
 
+/// Lists units ordered by name (ascending).
+///
+/// Delegates to the shared `data` crate.
+pub fn list_cards(conn: &Connection) -> Result<Vec<Unit>> {
+    data::cards::unit::list_cards(conn)
+}
+
 /// Inserts a new unit.
 ///
 /// Delegates to the shared `data` crate.

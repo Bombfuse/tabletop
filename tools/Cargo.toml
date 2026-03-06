@@ -9,16 +9,12 @@ default = ["gui"]
 # GUI app (default)
 gui = ["dep:iced", "dep:tokio"]
 
-# Keep CLI optional (not default)
-cli = ["dep:clap"]
-
 [dependencies]
 data = { path = "../data", features = ["bundled-sqlite"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 anyhow = "1"
 
-# CLI
-clap = { version = "4", features = ["derive"], optional = true }
+
 
 # GUI
 iced = { version = "0.12", features = ["tokio"], optional = true }

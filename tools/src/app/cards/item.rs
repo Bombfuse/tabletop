@@ -3,6 +3,13 @@ use rusqlite::Connection;
 
 pub use data::cards::item::Item;
 
+/// Lists items ordered by name (ascending).
+///
+/// Delegates to the shared `data` crate.
+pub fn list_cards(conn: &Connection) -> Result<Vec<Item>> {
+    data::cards::item::list_cards(conn)
+}
+
 /// Inserts a new item.
 ///
 /// Delegates to the shared `data` crate.
