@@ -245,6 +245,78 @@ pub fn get_association(conn: &Connection, action_name: &str) -> Result<Option<Ac
     Ok(assoc)
 }
 
+/// Lists all actions associated with a given Unit (by unit name), ordered by action name (ascending).
+pub fn list_actions_for_unit(conn: &Connection, unit_name: &str) -> Result<Vec<Action>> {
+    let unit_id = get_unit_id(conn, unit_name)?;
+    list_actions_by_fk(conn, "unit_id", unit_id)
+        .with_context(|| format!("Failed to list actions for Unit `{}`", unit_name.trim()))
+}
+
+/// Lists all actions associated with a given Item (by item name), ordered by action name (ascending).
+pub fn list_actions_for_item(conn: &Connection, item_name: &str) -> Result<Vec<Action>> {
+    let item_id = get_item_id(conn, item_name)?;
+    list_actions_by_fk(conn, "item_id", item_id)
+        .with_context(|| format!("Failed to list actions for Item `{}`", item_name.trim()))
+}
+
+/// Lists all actions associated with a given Level (by level name), ordered by action name (ascending).
+pub fn list_actions_for_level(conn: &Connection, level_name: &str) -> Result<Vec<Action>> {
+    let level_id = get_level_id(conn, level_name)?;
+    list_actions_by_fk(conn, "level_id", level_id)
+        .with_context(|| format!("Failed to list actions for Level `{}`", level_name.trim()))
+}
+
+fn list_actions_by_fk(conn: &Connection, fk_col: &str, fk_id: i64) -> Result<Vec<Action>> {
+    // We intentionally keep this internal helper simple and safe:
+    // - `fk_col` must be one of the known columns; otherwise we bail.
+    match fk_col {
+        "unit_id" | "item_id" | "level_id" => {}
+        other => anyhow::bail!(
+            "Invalid foreign key column `{}` for listing associated actions",
+            other
+        ),
+    }
+
+    let sql = format!(
+        r#"
+        SELECT name, action_point_cost, action_type, text
+        FROM actions
+        WHERE {} = ?1
+        ORDER BY name ASC
+        "#,
+        fk_col
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .with_context(|| format!("Failed to prepare list actions by `{}` query", fk_col))?;
+
+    let rows = stmt
+        .query_map(params![fk_id], |row| {
+            let action_type_str: String = row.get(2)?;
+            let action_type = ActionType::parse(&action_type_str).map_err(|_e| {
+                rusqlite::Error::InvalidColumnType(
+                    2,
+                    "action_type".to_string(),
+                    rusqlite::types::Type::Text,
+                )
+            })?;
+            Ok(Action {
+                name: row.get(0)?,
+                action_point_cost: row.get(1)?,
+                action_type,
+                text: row.get(3)?,
+            })
+        })
+        .with_context(|| format!("Failed to query actions by `{}`", fk_col))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.with_context(|| "Failed to read action row")?);
+    }
+    Ok(out)
+}
+
 /// Lists actions ordered by name (ascending).
 pub fn list_cards(conn: &Connection) -> Result<Vec<Action>> {
     let mut stmt = conn
@@ -550,11 +622,9 @@ mod tests {
                 CHECK (action_type IN ('Interaction', 'Attack'))
             );
 
-            -- Enforce "one action per card" (allow many NULLs)
-            CREATE UNIQUE INDEX uq_actions_unit_id ON actions(unit_id) WHERE unit_id IS NOT NULL;
-            CREATE UNIQUE INDEX uq_actions_item_id ON actions(item_id) WHERE item_id IS NOT NULL;
-            CREATE UNIQUE INDEX uq_actions_level_id ON actions(level_id) WHERE level_id IS NOT NULL;
-
+            -- NOTE: We intentionally do NOT enforce "one action per card".
+            -- Multiple actions may be associated with the same unit/item/level.
+            --
             -- Enforce "at most one association" and validate referenced rows exist.
             CREATE TRIGGER trg_actions_validate_action_links_insert
             BEFORE INSERT ON actions

@@ -2,7 +2,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 pub use data::cards::action::{
-    Action, ActionAssociation, ActionType, clear_association, get_association, set_association,
+    Action, ActionAssociation, ActionType, clear_association, get_association,
+    list_actions_for_item, list_actions_for_level, list_actions_for_unit, set_association,
 };
 
 /// Lists actions ordered by name (ascending).

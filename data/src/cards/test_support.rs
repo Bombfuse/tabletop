@@ -71,11 +71,9 @@ pub(crate) fn create_schema(conn: &Connection) {
             CHECK (action_type IN ('Interaction', 'Attack'))
         );
 
-        -- Enforce "one action per card" (allow many NULLs)
-        CREATE UNIQUE INDEX uq_actions_unit_id ON actions(unit_id) WHERE unit_id IS NOT NULL;
-        CREATE UNIQUE INDEX uq_actions_item_id ON actions(item_id) WHERE item_id IS NOT NULL;
-        CREATE UNIQUE INDEX uq_actions_level_id ON actions(level_id) WHERE level_id IS NOT NULL;
-
+        -- NOTE: We intentionally do NOT enforce "one action per card".
+        -- Multiple actions may be associated with the same unit/item/level.
+        --
         -- Validate links and enforce "at most one of unit_id/item_id/level_id".
         CREATE TRIGGER trg_actions_validate_action_links_insert
         BEFORE INSERT ON actions

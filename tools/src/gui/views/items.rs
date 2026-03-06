@@ -65,10 +65,7 @@ pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, M
     ]
     .spacing(12);
 
-    // Editable association: pick an Action name (dropdown), then explicitly Save/Clear.
-    // This is the closest we can get to an "auto complete dropdown" with current widgets:
-    // - a pick-list for selection
-    // - plus a text box for quick filtering/typing
+    // Add association: pick an Action name (dropdown) and click "Add".
     //
     // We filter choices using whatever the user has typed into the association box.
     // This approximates an "autocomplete dropdown" without a dedicated widget.
@@ -98,44 +95,72 @@ pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, M
         }
     };
 
-    let assoc_row = row![
-        text("Associated Action").width(Length::Fixed(140.0)),
+    let add_assoc_row = row![
+        text("Add Action").width(Length::Fixed(140.0)),
         pick_list(
             action_choices,
             selected_action,
             |choice: ActionNameChoice| Message::ItemAssocActionNameChanged(choice.0)
         )
-        .placeholder("(none)")
+        .placeholder("Select...")
         .width(Length::Fixed(320.0)),
-        button("Save").on_press(Message::SaveItemAssociation),
-        button("Clear").on_press(Message::ClearItemAssociation),
+        button("Add").on_press(Message::AddItemAssociation),
         iced::widget::Space::with_width(Length::Fill),
     ]
     .spacing(12)
     .align_items(Alignment::Center);
 
-    let assoc_filter_row = row![
+    let add_assoc_filter_row = row![
         text("Filter").width(Length::Fixed(140.0)),
-        text_input(
-            "type to filter / exact action name",
-            &app.item_assoc_action_name
-        )
-        .on_input(Message::ItemAssocActionNameChanged)
-        .padding(8)
-        .width(Length::Fixed(320.0)),
+        text_input("type to filter", &app.item_assoc_action_name)
+            .on_input(Message::ItemAssocActionNameChanged)
+            .padding(8)
+            .width(Length::Fixed(320.0)),
         iced::widget::Space::with_width(Length::Fill),
     ]
     .spacing(12)
     .align_items(Alignment::Center);
+
+    // Fully list all associated actions at the bottom, each with a Remove button.
+    //
+    // NOTE: This relies on the loaded actions list including association info.
+    // We treat every action whose `item_name == original_name` as associated.
+    let mut associated: Vec<&crate::gui::ActionRow> = app
+        .actions
+        .iter()
+        .filter(|a| a.item_name.as_deref() == Some(original_name))
+        .collect();
+    associated.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut associated_list = column![text("Associated Actions").size(16)].spacing(8);
+
+    if associated.is_empty() {
+        associated_list = associated_list.push(text("(none)").size(12));
+    } else {
+        for a in associated {
+            let row_el = row![
+                text(a.name.clone()).size(14),
+                iced::widget::Space::with_width(Length::Fill),
+                button("Remove").on_press(Message::RemoveItemAssociation(a.name.clone())),
+            ]
+            .spacing(12)
+            .align_items(Alignment::Center);
+
+            associated_list = associated_list.push(container(row_el).padding(6));
+        }
+    }
 
     let form = column![
-        assoc_row,
-        assoc_filter_row,
+        add_assoc_row,
+        add_assoc_filter_row,
+        horizontal_rule(1),
         row![
             labeled_input("Name", &app.item_name, Message::ItemNameChanged),
             iced::widget::Space::with_width(Length::Fill),
         ]
         .spacing(12),
+        horizontal_rule(1),
+        associated_list,
     ]
     .spacing(10);
 

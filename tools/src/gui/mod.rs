@@ -93,12 +93,15 @@ pub enum Message {
     UnitAssocActionNameChanged(String),
     ItemAssocActionNameChanged(String),
     LevelAssocActionNameChanged(String),
-    SaveUnitAssociation,
-    ClearUnitAssociation,
-    SaveItemAssociation,
-    ClearItemAssociation,
-    SaveLevelAssociation,
-    ClearLevelAssociation,
+
+    AddUnitAssociation,
+    RemoveUnitAssociation(String),
+
+    AddItemAssociation,
+    RemoveItemAssociation(String),
+
+    AddLevelAssociation,
+    RemoveLevelAssociation(String),
 
     // Attack subform (used for create + edit when ActionType = Attack)
     AttackDamageChanged(String),
@@ -379,21 +382,22 @@ impl Application for ToolsGui {
                 self.unit_assoc_action_name = v;
                 Command::none()
             }
-            Message::SaveUnitAssociation => {
+            Message::AddUnitAssociation => {
                 if let Err(e) = self.save_unit_association() {
                     self.status = Some(format!("{e:#}"));
                     Command::none()
                 } else {
-                    self.status = Some("Unit association saved".to_string());
+                    self.status = Some("Unit association added".to_string());
+                    self.unit_assoc_action_name.clear();
                     Command::perform(async {}, |_| Message::Refresh)
                 }
             }
-            Message::ClearUnitAssociation => {
-                if let Err(e) = self.clear_unit_association() {
+            Message::RemoveUnitAssociation(action_name) => {
+                if let Err(e) = self.remove_unit_association(&action_name) {
                     self.status = Some(format!("{e:#}"));
                     Command::none()
                 } else {
-                    self.status = Some("Unit association cleared".to_string());
+                    self.status = Some("Unit association removed".to_string());
                     Command::perform(async {}, |_| Message::Refresh)
                 }
             }
@@ -416,21 +420,22 @@ impl Application for ToolsGui {
                 self.item_assoc_action_name = v;
                 Command::none()
             }
-            Message::SaveItemAssociation => {
+            Message::AddItemAssociation => {
                 if let Err(e) = self.save_item_association() {
                     self.status = Some(format!("{e:#}"));
                     Command::none()
                 } else {
-                    self.status = Some("Item association saved".to_string());
+                    self.status = Some("Item association added".to_string());
+                    self.item_assoc_action_name.clear();
                     Command::perform(async {}, |_| Message::Refresh)
                 }
             }
-            Message::ClearItemAssociation => {
-                if let Err(e) = self.clear_item_association() {
+            Message::RemoveItemAssociation(action_name) => {
+                if let Err(e) = self.remove_item_association(&action_name) {
                     self.status = Some(format!("{e:#}"));
                     Command::none()
                 } else {
-                    self.status = Some("Item association cleared".to_string());
+                    self.status = Some("Item association removed".to_string());
                     Command::perform(async {}, |_| Message::Refresh)
                 }
             }
@@ -458,21 +463,22 @@ impl Application for ToolsGui {
                 self.level_assoc_action_name = v;
                 Command::none()
             }
-            Message::SaveLevelAssociation => {
+            Message::AddLevelAssociation => {
                 if let Err(e) = self.save_level_association() {
                     self.status = Some(format!("{e:#}"));
                     Command::none()
                 } else {
-                    self.status = Some("Level association saved".to_string());
+                    self.status = Some("Level association added".to_string());
+                    self.level_assoc_action_name.clear();
                     Command::perform(async {}, |_| Message::Refresh)
                 }
             }
-            Message::ClearLevelAssociation => {
-                if let Err(e) = self.clear_level_association() {
+            Message::RemoveLevelAssociation(action_name) => {
+                if let Err(e) = self.remove_level_association(&action_name) {
                     self.status = Some(format!("{e:#}"));
                     Command::none()
                 } else {
-                    self.status = Some("Level association cleared".to_string());
+                    self.status = Some("Level association removed".to_string());
                     Command::perform(async {}, |_| Message::Refresh)
                 }
             }
@@ -1279,25 +1285,27 @@ impl ToolsGui {
         Ok(())
     }
 
-    fn clear_unit_association(&self) -> Result<()> {
+    // NOTE: `clear_unit_association` removed.
+    // Associations are now removed one-by-one via `remove_unit_association(action_name)`.
+
+    fn remove_unit_association(&self, action_name: &str) -> Result<()> {
         let ActiveView::EditUnit { original_name } = &self.active_view else {
             anyhow::bail!("Not currently editing a unit");
         };
 
         let conn = self.open_conn()?;
 
-        // Find any action currently linked to this unit and clear it.
-        // (No-op if none.)
-        for a in app::cards::action::list_cards(&conn)? {
-            if matches!(
-                app::cards::action::get_association(&conn, &a.name)?,
-                Some(app::cards::action::ActionAssociation::Unit { unit_name }) if unit_name == *original_name
-            ) {
-                let _ = app::cards::action::clear_association(&conn, &a.name);
+        // Only clear if this action is actually associated with this unit.
+        match app::cards::action::get_association(&conn, action_name)? {
+            Some(app::cards::action::ActionAssociation::Unit { unit_name })
+                if unit_name == *original_name =>
+            {
+                app::cards::action::clear_association(&conn, action_name)?;
+                Ok(())
             }
+            Some(_) => anyhow::bail!("Action `{}` is not associated with this Unit", action_name),
+            None => anyhow::bail!("Action `{}` not found (or has no association)", action_name),
         }
-
-        Ok(())
     }
 
     fn save_item_association(&self) -> Result<()> {
@@ -1323,23 +1331,26 @@ impl ToolsGui {
         Ok(())
     }
 
-    fn clear_item_association(&self) -> Result<()> {
+    // NOTE: `clear_item_association` removed.
+    // Associations are now removed one-by-one via `remove_item_association(action_name)`.
+
+    fn remove_item_association(&self, action_name: &str) -> Result<()> {
         let ActiveView::EditItem { original_name } = &self.active_view else {
             anyhow::bail!("Not currently editing an item");
         };
 
         let conn = self.open_conn()?;
 
-        for a in app::cards::action::list_cards(&conn)? {
-            if matches!(
-                app::cards::action::get_association(&conn, &a.name)?,
-                Some(app::cards::action::ActionAssociation::Item { item_name }) if item_name == *original_name
-            ) {
-                let _ = app::cards::action::clear_association(&conn, &a.name);
+        match app::cards::action::get_association(&conn, action_name)? {
+            Some(app::cards::action::ActionAssociation::Item { item_name })
+                if item_name == *original_name =>
+            {
+                app::cards::action::clear_association(&conn, action_name)?;
+                Ok(())
             }
+            Some(_) => anyhow::bail!("Action `{}` is not associated with this Item", action_name),
+            None => anyhow::bail!("Action `{}` not found (or has no association)", action_name),
         }
-
-        Ok(())
     }
 
     fn save_level_association(&self) -> Result<()> {
@@ -1365,23 +1376,26 @@ impl ToolsGui {
         Ok(())
     }
 
-    fn clear_level_association(&self) -> Result<()> {
+    // NOTE: `clear_level_association` removed.
+    // Associations are now removed one-by-one via `remove_level_association(action_name)`.
+
+    fn remove_level_association(&self, action_name: &str) -> Result<()> {
         let ActiveView::EditLevel { original_name } = &self.active_view else {
             anyhow::bail!("Not currently editing a level");
         };
 
         let conn = self.open_conn()?;
 
-        for a in app::cards::action::list_cards(&conn)? {
-            if matches!(
-                app::cards::action::get_association(&conn, &a.name)?,
-                Some(app::cards::action::ActionAssociation::Level { level_name }) if level_name == *original_name
-            ) {
-                let _ = app::cards::action::clear_association(&conn, &a.name);
+        match app::cards::action::get_association(&conn, action_name)? {
+            Some(app::cards::action::ActionAssociation::Level { level_name })
+                if level_name == *original_name =>
+            {
+                app::cards::action::clear_association(&conn, action_name)?;
+                Ok(())
             }
+            Some(_) => anyhow::bail!("Action `{}` is not associated with this Level", action_name),
+            None => anyhow::bail!("Action `{}` not found (or has no association)", action_name),
         }
-
-        Ok(())
     }
 
     fn current_action_name_for_subforms(&self) -> Result<&str> {
