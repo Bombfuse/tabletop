@@ -2,6 +2,7 @@ use anyhow::Result;
 use iced::widget::{button, column, container, horizontal_rule, pick_list, row, text, text_input};
 use iced::{Alignment, Element, Length};
 
+use crate::gui::views::shared::associated_actions;
 use crate::gui::{ItemRow, Message, ToolsGui};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +19,59 @@ fn normalize_for_match(s: &str) -> String {
 }
 
 pub fn view(app: &ToolsGui) -> Element<'_, Message> {
+    // Create form: include optional "Add Action" association input (same UX as edit view).
+    // The association is applied when creating the item (if an action is selected).
+    let filter = normalize_for_match(&app.item_assoc_action_name);
+
+    let mut action_choices: Vec<ActionNameChoice> = app
+        .actions
+        .iter()
+        .map(|a| a.name.clone())
+        .filter(|name| {
+            if filter.is_empty() {
+                true
+            } else {
+                normalize_for_match(name).contains(&filter)
+            }
+        })
+        .map(ActionNameChoice)
+        .collect();
+    action_choices.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let selected_action = {
+        let trimmed = app.item_assoc_action_name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(ActionNameChoice(trimmed.to_string()))
+        }
+    };
+
+    let add_assoc_row = row![
+        text("Add Action").width(Length::Fixed(140.0)),
+        pick_list(
+            action_choices,
+            selected_action,
+            |choice: ActionNameChoice| Message::ItemAssocActionNameChanged(choice.0)
+        )
+        .placeholder("Select...")
+        .width(Length::Fixed(320.0)),
+        iced::widget::Space::with_width(Length::Fill),
+    ]
+    .spacing(12)
+    .align_items(Alignment::Center);
+
+    let add_assoc_filter_row = row![
+        text("Filter").width(Length::Fixed(140.0)),
+        text_input("type to filter", &app.item_assoc_action_name)
+            .on_input(Message::ItemAssocActionNameChanged)
+            .padding(8)
+            .width(Length::Fixed(320.0)),
+        iced::widget::Space::with_width(Length::Fill),
+    ]
+    .spacing(12)
+    .align_items(Alignment::Center);
+
     let form = column![
         text("Create Item").size(18),
         row![
@@ -25,7 +79,10 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
             iced::widget::Space::with_width(Length::Fill),
         ]
         .spacing(12),
-        row![button("Create").on_press(Message::CreateItem)].spacing(12),
+        horizontal_rule(1),
+        add_assoc_row,
+        add_assoc_filter_row,
+        row![button("Create").on_press(Message::CreateItemAndMaybeAssociate)].spacing(12),
     ]
     .spacing(10);
 
@@ -39,7 +96,7 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
 
     for it in &app.items {
         let row_el = row![
-            text(it.name.clone()).size(16),
+            column![text(it.name.clone()).size(16)].spacing(2),
             iced::widget::Space::with_width(Length::Fill),
             button("Edit").on_press(Message::EditItem(it.name.clone())),
             button("Delete").on_press(Message::DeleteItem(it.name.clone())),
@@ -50,7 +107,8 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
     }
 
     // Let the parent/root scroll view measure this content naturally.
-    // Forcing `Length::Fill` here can fight the root scroll container and feel "infinite".
+    // If we force `Length::Fill` here, it can behave like "infinite height"
+    // and fight the root scroll container.
     column![form, horizontal_rule(1), list_col]
         .spacing(12)
         .into()
@@ -121,34 +179,10 @@ pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, M
     .spacing(12)
     .align_items(Alignment::Center);
 
-    // Fully list all associated actions at the bottom, each with a Remove button.
-    //
-    // NOTE: This relies on the loaded actions list including association info.
-    // We treat every action whose `item_name == original_name` as associated.
-    let mut associated: Vec<&crate::gui::ActionRow> = app
-        .actions
-        .iter()
-        .filter(|a| a.item_name.as_deref() == Some(original_name))
-        .collect();
-    associated.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut associated_list = column![text("Associated Actions").size(16)].spacing(8);
-
-    if associated.is_empty() {
-        associated_list = associated_list.push(text("(none)").size(12));
-    } else {
-        for a in associated {
-            let row_el = row![
-                text(a.name.clone()).size(14),
-                iced::widget::Space::with_width(Length::Fill),
-                button("Remove").on_press(Message::RemoveItemAssociation(a.name.clone())),
-            ]
-            .spacing(12)
-            .align_items(Alignment::Center);
-
-            associated_list = associated_list.push(container(row_el).padding(6));
-        }
-    }
+    // Fully list all associated actions at the bottom (shared component).
+    let associated = associated_actions::collect_for_item(&app.actions, original_name);
+    let associated_list =
+        associated_actions::view(&associated, |name| Message::RemoveItemAssociation(name));
 
     let form = column![
         add_assoc_row,

@@ -3,6 +3,8 @@ pub mod items;
 pub mod levels;
 pub mod units;
 
+pub mod shared;
+
 use iced::widget::{button, row, text};
 use iced::{Element, Length};
 

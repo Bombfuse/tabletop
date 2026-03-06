@@ -89,7 +89,7 @@ pub enum Message {
 
     CreateAction,
 
-    // Optional associations set from Unit/Item/Level edit views
+    // Optional associations set from Unit/Item/Level views
     UnitAssocActionNameChanged(String),
     ItemAssocActionNameChanged(String),
     LevelAssocActionNameChanged(String),
@@ -102,6 +102,11 @@ pub enum Message {
 
     AddLevelAssociation,
     RemoveLevelAssociation(String),
+
+    // Create + associate in one step (from create forms)
+    CreateUnitAndMaybeAssociate,
+    CreateItemAndMaybeAssociate,
+    CreateLevelAndMaybeAssociate,
 
     // Attack subform (used for create + edit when ActionType = Attack)
     AttackDamageChanged(String),
@@ -402,6 +407,17 @@ impl Application for ToolsGui {
                 }
             }
 
+            Message::CreateUnitAndMaybeAssociate => {
+                if let Err(e) = self.create_unit_and_maybe_associate_from_form() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Unit created".to_string());
+                    self.unit_name.clear();
+                    self.unit_assoc_action_name.clear();
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
             Message::ItemNameChanged(v) => {
                 self.item_name = v;
                 Command::none()
@@ -412,6 +428,17 @@ impl Application for ToolsGui {
                 } else {
                     self.status = Some("Item created".to_string());
                     self.item_name.clear();
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
+            Message::CreateItemAndMaybeAssociate => {
+                if let Err(e) = self.create_item_and_maybe_associate_from_form() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Item created".to_string());
+                    self.item_name.clear();
+                    self.item_assoc_action_name.clear();
                 }
                 Command::perform(async {}, |_| Message::Refresh)
             }
@@ -455,6 +482,18 @@ impl Application for ToolsGui {
                     self.status = Some("Level created".to_string());
                     self.level_name.clear();
                     self.level_text.clear();
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
+            Message::CreateLevelAndMaybeAssociate => {
+                if let Err(e) = self.create_level_and_maybe_associate_from_form() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Level created".to_string());
+                    self.level_name.clear();
+                    self.level_text.clear();
+                    self.level_assoc_action_name.clear();
                 }
                 Command::perform(async {}, |_| Message::Refresh)
             }
@@ -600,6 +639,10 @@ impl Application for ToolsGui {
             }
 
             Message::EditAction(name) => {
+                // When navigating to an Action from another tab (e.g. Unit/Item/Level details),
+                // make sure the Actions tab is selected so the edit view is actually visible.
+                self.tab = Tab::Actions;
+
                 if let Err(e) = self.begin_edit_action(&name) {
                     self.status = Some(format!("{e:#}"));
                 }
@@ -863,12 +906,61 @@ impl ToolsGui {
         Ok(())
     }
 
+    fn create_unit_and_maybe_associate_from_form(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        let unit = app::cards::unit::Unit {
+            name: self.unit_name.trim().to_string(),
+            strength: Self::parse_i64_field("Strength", &self.unit_strength)?,
+            focus: Self::parse_i64_field("Focus", &self.unit_focus)?,
+            intelligence: Self::parse_i64_field("Intelligence", &self.unit_intelligence)?,
+            agility: Self::parse_i64_field("Agility", &self.unit_agility)?,
+            knowledge: Self::parse_i64_field("Knowledge", &self.unit_knowledge)?,
+        };
+
+        let unit_name = unit.name.clone();
+        app::cards::unit::save_card(&conn, &unit)?;
+
+        let action_name = self.unit_assoc_action_name.trim();
+        if !action_name.is_empty() {
+            app::cards::action::set_association(
+                &conn,
+                action_name,
+                &app::cards::action::ActionAssociation::Unit { unit_name },
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn create_item_from_form(&self) -> Result<()> {
         let conn = self.open_conn()?;
         let item = app::cards::item::Item {
             name: self.item_name.trim().to_string(),
         };
         app::cards::item::save_card(&conn, &item)?;
+        Ok(())
+    }
+
+    fn create_item_and_maybe_associate_from_form(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        let item = app::cards::item::Item {
+            name: self.item_name.trim().to_string(),
+        };
+
+        let item_name = item.name.clone();
+        app::cards::item::save_card(&conn, &item)?;
+
+        let action_name = self.item_assoc_action_name.trim();
+        if !action_name.is_empty() {
+            app::cards::action::set_association(
+                &conn,
+                action_name,
+                &app::cards::action::ActionAssociation::Item { item_name },
+            )?;
+        }
+
         Ok(())
     }
 
@@ -881,6 +973,29 @@ impl ToolsGui {
         };
 
         app::cards::level::save_card(&conn, &level)?;
+        Ok(())
+    }
+
+    fn create_level_and_maybe_associate_from_form(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        let level = app::cards::level::Level {
+            name: self.level_name.trim().to_string(),
+            text: self.level_text.trim().to_string(),
+        };
+
+        let level_name = level.name.clone();
+        app::cards::level::save_card(&conn, &level)?;
+
+        let action_name = self.level_assoc_action_name.trim();
+        if !action_name.is_empty() {
+            app::cards::action::set_association(
+                &conn,
+                action_name,
+                &app::cards::action::ActionAssociation::Level { level_name },
+            )?;
+        }
+
         Ok(())
     }
 
