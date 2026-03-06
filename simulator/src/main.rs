@@ -1,133 +1,18 @@
 use iced::{Application, Element, Settings, Theme};
 
 use data::cards::unit;
-use rusqlite::OptionalExtension;
 
+mod db;
 mod pages;
+mod types;
 
 const CORE_DB_PATH: &str = "tabletop.sqlite3";
-const SIMULATOR_DB_PATH: &str = "simulator.sqlite3";
-
-const MIGRATIONS_TABLE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS migrations (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    filename      TEXT NOT NULL UNIQUE,
-    applied_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-"#;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CampaignSummary {
-    id: i64,
-    hero_unit_name: String,
-    created_at: String,
-}
-
-fn open_simulator_db() -> anyhow::Result<rusqlite::Connection> {
-    use anyhow::Context;
-
-    let conn = rusqlite::Connection::open(SIMULATOR_DB_PATH)
-        .with_context(|| format!("open simulator db at `{SIMULATOR_DB_PATH}`"))?;
-
-    // Reasonable defaults for application DBs.
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .context("enable foreign_keys for simulator db")?;
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .context("set journal_mode=WAL for simulator db")?;
-
-    Ok(conn)
-}
-
-/// Applies all simulator migrations to the simulator database.
-///
-/// Migrations live in `simulator/migrations/*.sql` and are applied in lexical order
-/// by filename. Each file is applied at most once (tracked in the `migrations` table).
-fn apply_simulator_migrations() -> anyhow::Result<()> {
-    use anyhow::Context;
-
-    let mut conn = open_simulator_db().context("open simulator db")?;
-
-    conn.execute_batch(MIGRATIONS_TABLE_SQL)
-        .context("ensure migrations table exists in simulator db")?;
-
-    // Load migration files embedded at compile-time.
-    //
-    // NOTE: If you add a migration file, you must also add it to this list.
-    let migrations: &[(&str, &str)] = &[(
-        "0001_campaigns.sql",
-        include_str!("../migrations/0001_campaigns.sql"),
-    )];
-
-    for (filename, sql) in migrations {
-        let already_applied: bool = conn
-            .query_row(
-                "SELECT 1 FROM migrations WHERE filename = ?1",
-                rusqlite::params![filename],
-                |_row| Ok(true),
-            )
-            .optional()
-            .context("check whether migration is already applied")?
-            .unwrap_or(false);
-
-        if already_applied {
-            continue;
-        }
-
-        let tx = conn
-            .transaction()
-            .with_context(|| format!("begin transaction for migration `{filename}`"))?;
-
-        tx.execute_batch(sql)
-            .with_context(|| format!("apply migration `{filename}`"))?;
-
-        tx.execute(
-            "INSERT INTO migrations (filename) VALUES (?1)",
-            rusqlite::params![filename],
-        )
-        .with_context(|| format!("record migration `{filename}`"))?;
-
-        tx.commit()
-            .with_context(|| format!("commit migration `{filename}`"))?;
-    }
-
-    Ok(())
-}
-
-fn list_campaigns(conn: &rusqlite::Connection) -> anyhow::Result<Vec<CampaignSummary>> {
-    use anyhow::Context;
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT id, hero_unit_name, created_at
-            FROM campaigns
-            ORDER BY datetime(created_at) DESC, id DESC
-            "#,
-        )
-        .context("prepare list campaigns query")?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(CampaignSummary {
-                id: row.get(0)?,
-                hero_unit_name: row.get(1)?,
-                created_at: row.get(2)?,
-            })
-        })
-        .context("query campaigns")?;
-
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.context("read campaign row")?);
-    }
-    Ok(out)
-}
 
 fn main() -> iced::Result {
     // Run simulator migrations on startup (simulator DB is separate from core DB).
-    if let Err(e) = apply_simulator_migrations() {
+    if let Err(e) = db::apply_migrations() {
         eprintln!("Failed to apply simulator migrations: {e:#}");
-        // Continue launching UI; DB errors will be surfaced again when starting a campaign.
+        // Continue launching UI; DB errors will be surfaced again when starting/continuing a campaign.
     }
 
     Simulator::run(Settings {
@@ -139,26 +24,7 @@ fn main() -> iced::Result {
     })
 }
 
-#[derive(Debug, Clone)]
-enum Screen {
-    MainMenu,
-    CampaignSelectHero,
-    CampaignContinueSelect,
-    CampaignHome { campaign_id: i64 },
-}
-
-#[derive(Debug, Clone)]
-enum Message {
-    StartCampaign,
-    ContinueCampaign,
-    ExitApp,
-    BackToMenu,
-
-    SelectHero(String),
-    BeginCampaign,
-
-    SelectCampaign(i64),
-}
+use types::{Message, Screen};
 
 struct Simulator {
     screen: Screen,
@@ -169,7 +35,7 @@ struct Simulator {
 
     campaign_saved: Option<String>,
 
-    campaigns: Vec<CampaignSummary>,
+    campaigns: Vec<db::CampaignSummary>,
 }
 
 impl Simulator {
@@ -237,12 +103,12 @@ impl iced::Application for Simulator {
                 self.campaign_saved = None;
                 self.campaigns.clear();
 
-                if let Err(e) = apply_simulator_migrations() {
+                if let Err(e) = db::apply_migrations() {
                     self.load_error = Some(format!("Failed to apply simulator migrations: {e}"));
                     return iced::Command::none();
                 }
 
-                match open_simulator_db().and_then(|conn| list_campaigns(&conn)) {
+                match db::open().and_then(|conn| db::list_campaigns(&conn)) {
                     Ok(campaigns) => self.campaigns = campaigns,
                     Err(e) => self.load_error = Some(e.to_string()),
                 }
@@ -263,21 +129,12 @@ impl iced::Application for Simulator {
                 };
 
                 // Ensure simulator DB schema is up-to-date before writing campaign data.
-                if let Err(e) = apply_simulator_migrations() {
+                if let Err(e) = db::apply_migrations() {
                     self.load_error = Some(format!("Failed to apply simulator migrations: {e}"));
                     return iced::Command::none();
                 }
 
-                match open_simulator_db().and_then(|conn| {
-                    conn.execute(
-                        r#"
-                        INSERT INTO campaigns (hero_unit_name)
-                        VALUES (?1)
-                        "#,
-                        rusqlite::params![hero_name],
-                    )?;
-                    Ok(())
-                }) {
+                match db::open().and_then(|conn| db::create_campaign(&conn, &hero_name)) {
                     Ok(()) => {
                         self.campaign_saved =
                             Some("Campaign created and saved to simulator database.".to_string());

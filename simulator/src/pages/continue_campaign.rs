@@ -2,7 +2,8 @@ use iced::alignment::Horizontal;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length};
 
-use crate::{CampaignSummary, Message};
+use crate::db::CampaignSummary;
+use crate::types::Message;
 
 /// Renders the "Continue Campaign" page:
 /// - shows existing campaigns (loaded by the app from the simulator DB)

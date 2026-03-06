@@ -2,7 +2,7 @@ use iced::alignment::Horizontal;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length};
 
-use crate::Message;
+use crate::types::Message;
 use data::cards::unit;
 
 /// Renders the "Start Campaign" page:

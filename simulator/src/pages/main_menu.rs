@@ -2,7 +2,7 @@ use iced::alignment::Horizontal;
 use iced::widget::{button, column, container, text};
 use iced::{Element, Length};
 
-use crate::Message;
+use crate::types::Message;
 
 /// Renders the simulator main menu.
 ///
