@@ -24,6 +24,7 @@ pub fn run() -> iced::Result {
 pub enum Tab {
     Units,
     Items,
+    Levels,
 }
 
 impl Tab {
@@ -31,6 +32,7 @@ impl Tab {
         match self {
             Tab::Units => "Units",
             Tab::Items => "Items",
+            Tab::Levels => "Levels",
         }
     }
 }
@@ -40,6 +42,7 @@ pub enum ActiveView {
     List,
     EditUnit { original_name: String },
     EditItem { original_name: String },
+    EditLevel { original_name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -62,18 +65,26 @@ pub enum Message {
     ItemNameChanged(String),
     CreateItem,
 
+    // Levels form
+    LevelNameChanged(String),
+    LevelTextChanged(String),
+    CreateLevel,
+
     // Edit navigation
     EditUnit(String),
     EditItem(String),
+    EditLevel(String),
     CancelEdit,
 
     // Save edits
     SaveUnitEdits,
     SaveItemEdits,
+    SaveLevelEdits,
 
     // Delete actions
     DeleteUnit(String),
     DeleteItem(String),
+    DeleteLevel(String),
 
     // Status
     ClearStatus,
@@ -94,6 +105,12 @@ pub struct ItemRow {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelRow {
+    pub name: String,
+    pub text: String,
+}
+
 pub struct ToolsGui {
     pub tab: Tab,
 
@@ -112,9 +129,14 @@ pub struct ToolsGui {
     // Items form / edit buffer
     pub item_name: String,
 
+    // Levels form / edit buffer
+    pub level_name: String,
+    pub level_text: String,
+
     // loaded data
     pub units: Vec<UnitRow>,
     pub items: Vec<ItemRow>,
+    pub levels: Vec<LevelRow>,
 
     // ui state
     pub status: Option<String>,
@@ -147,8 +169,12 @@ impl Default for ToolsGui {
 
             item_name: String::new(),
 
+            level_name: String::new(),
+            level_text: String::new(),
+
             units: vec![],
             items: vec![],
+            levels: vec![],
 
             status: None,
             active_view: ActiveView::List,
@@ -254,6 +280,25 @@ impl Application for ToolsGui {
                 Command::perform(async {}, |_| Message::Refresh)
             }
 
+            Message::LevelNameChanged(v) => {
+                self.level_name = v;
+                Command::none()
+            }
+            Message::LevelTextChanged(v) => {
+                self.level_text = v;
+                Command::none()
+            }
+            Message::CreateLevel => {
+                if let Err(e) = self.create_level_from_form() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Level created".to_string());
+                    self.level_name.clear();
+                    self.level_text.clear();
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
             Message::EditUnit(name) => {
                 if let Err(e) = self.begin_edit_unit(&name) {
                     self.status = Some(format!("{e:#}"));
@@ -263,6 +308,13 @@ impl Application for ToolsGui {
 
             Message::EditItem(name) => {
                 if let Err(e) = self.begin_edit_item(&name) {
+                    self.status = Some(format!("{e:#}"));
+                }
+                Command::none()
+            }
+
+            Message::EditLevel(name) => {
+                if let Err(e) = self.begin_edit_level(&name) {
                     self.status = Some(format!("{e:#}"));
                 }
                 Command::none()
@@ -295,6 +347,17 @@ impl Application for ToolsGui {
                 }
             }
 
+            Message::SaveLevelEdits => {
+                if let Err(e) = self.save_level_edits() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Level updated".to_string());
+                    self.active_view = ActiveView::List;
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+
             Message::DeleteUnit(name) => {
                 if let Err(e) = self.delete_unit(&name) {
                     self.status = Some(format!("{e:#}"));
@@ -309,6 +372,15 @@ impl Application for ToolsGui {
                     self.status = Some(format!("{e:#}"));
                 } else {
                     self.status = Some(format!("Deleted item `{name}`"));
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
+            Message::DeleteLevel(name) => {
+                if let Err(e) = self.delete_level(&name) {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some(format!("Deleted level `{name}`"));
                 }
                 Command::perform(async {}, |_| Message::Refresh)
             }
@@ -331,6 +403,7 @@ impl Application for ToolsGui {
         let tabs = row![
             views::tab_button(self.tab, Tab::Units),
             views::tab_button(self.tab, Tab::Items),
+            views::tab_button(self.tab, Tab::Levels),
             iced::widget::Space::with_width(Length::Fill),
         ]
         .spacing(8);
@@ -351,6 +424,13 @@ impl Application for ToolsGui {
                     views::items::edit_view(self, original_name)
                 }
                 _ => views::items::view(self),
+            },
+            Tab::Levels => match &self.active_view {
+                ActiveView::List => views::levels::view(self),
+                ActiveView::EditLevel { original_name } => {
+                    views::levels::edit_view(self, original_name)
+                }
+                _ => views::levels::view(self),
             },
         };
 
@@ -436,6 +516,7 @@ impl ToolsGui {
 
         self.units = views::units::list_units(&conn)?;
         self.items = views::items::list_items(&conn)?;
+        self.levels = views::levels::list_levels(&conn)?;
 
         Ok(())
     }
@@ -476,6 +557,18 @@ impl ToolsGui {
         Ok(())
     }
 
+    fn create_level_from_form(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        let level = app::cards::level::Level {
+            name: self.level_name.trim().to_string(),
+            text: self.level_text.trim().to_string(),
+        };
+
+        app::cards::level::save_card(&conn, &level)?;
+        Ok(())
+    }
+
     fn delete_unit(&self, name: &str) -> Result<()> {
         let conn = self.open_conn()?;
         let _ = app::cards::unit::delete_card(&conn, name)?;
@@ -485,6 +578,12 @@ impl ToolsGui {
     fn delete_item(&self, name: &str) -> Result<()> {
         let conn = self.open_conn()?;
         let _ = app::cards::item::delete_card(&conn, name)?;
+        Ok(())
+    }
+
+    fn delete_level(&self, name: &str) -> Result<()> {
+        let conn = self.open_conn()?;
+        let _ = app::cards::level::delete_card(&conn, name)?;
         Ok(())
     }
 
@@ -515,6 +614,20 @@ impl ToolsGui {
 
         self.active_view = ActiveView::EditItem {
             original_name: it.name,
+        };
+        Ok(())
+    }
+
+    fn begin_edit_level(&mut self, name: &str) -> Result<()> {
+        let conn = self.open_conn()?;
+        let lv = app::cards::level::get_card(&conn, name)?
+            .with_context(|| format!("Level `{name}` not found"))?;
+
+        self.level_name = lv.name.clone();
+        self.level_text = lv.text.clone();
+
+        self.active_view = ActiveView::EditLevel {
+            original_name: lv.name,
         };
         Ok(())
     }
@@ -563,6 +676,35 @@ impl ToolsGui {
 
         let updated = app::cards::item::rename_card(&conn, original_name, &item)?
             .with_context(|| format!("Item `{}` does not exist", original_name))?;
+        let _ = updated;
+
+        Ok(())
+    }
+
+    fn save_level_edits(&self) -> Result<()> {
+        let ActiveView::EditLevel { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing a level");
+        };
+
+        let conn = self.open_conn()?;
+
+        let new_name = self.level_name.trim().to_string();
+        if new_name.is_empty() {
+            anyhow::bail!("Level.name must be non-empty");
+        }
+
+        let new_text = self.level_text.trim().to_string();
+        if new_text.is_empty() {
+            anyhow::bail!("Level.text must be non-empty");
+        }
+
+        let level = app::cards::level::Level {
+            name: new_name,
+            text: new_text,
+        };
+
+        let updated = app::cards::level::rename_card(&conn, original_name, &level)?
+            .with_context(|| format!("Level `{}` does not exist", original_name))?;
         let _ = updated;
 
         Ok(())

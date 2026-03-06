@@ -3,6 +3,7 @@
 //! Each card type lives in its own module/file.
 
 pub mod item;
+pub mod level;
 pub mod unit;
 
 #[cfg(test)]

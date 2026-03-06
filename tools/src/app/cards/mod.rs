@@ -1,4 +1,5 @@
 pub mod item;
+pub mod level;
 pub mod unit;
 
 // Test support (in-memory DB + schema) has been moved into the shared `data` crate.

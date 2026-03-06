@@ -36,6 +36,18 @@ pub(crate) fn create_schema(conn: &Connection) {
 
             CHECK (length(trim(name)) > 0)
         );
+
+        CREATE TABLE levels (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL UNIQUE,
+            text          TEXT NOT NULL,
+
+            created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
+            CHECK (length(trim(name)) > 0),
+            CHECK (length(trim(text)) > 0)
+        );
         "#,
     )
     .expect("create test schema");
