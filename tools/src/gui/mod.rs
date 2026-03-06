@@ -1,7 +1,7 @@
 mod shared;
 mod views;
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -86,9 +86,6 @@ pub enum Message {
     HexGridApplyResize,
     HexGridTileClicked(i32, i32),
     HexGridTileClear(i32, i32),
-    HexGridKvKeyChanged(String),
-    HexGridKvValueChanged(String),
-    HexGridAppendKvToSelectedTile,
 
     // Armor modifiers form (single "draft" row editor)
     ArmorModifierValueChanged(String),
@@ -315,10 +312,9 @@ pub struct ToolsGui {
 
     pub hex_grid_selected_x: Option<i32>,
     pub hex_grid_selected_y: Option<i32>,
-    pub hex_grid_kv_key: String,
-    pub hex_grid_kv_value: String,
-    // Map from (x,y) -> JSON text payload for that tile
-    pub hex_grid_tile_json_by_xy: BTreeMap<(i32, i32), String>,
+
+    // Tile presence only: coordinates that currently contain a tile
+    pub hex_grid_tiles_present: BTreeSet<(i32, i32)>,
 
     // Pending armor modifiers (used by create-card flows; linked on create)
     pub pending_armor_modifiers: Vec<app::cards::armor_modifier::ArmorModifier>,
@@ -404,16 +400,14 @@ impl Default for ToolsGui {
 
             hex_grid_selected_x: None,
             hex_grid_selected_y: None,
-            hex_grid_kv_key: String::new(),
-            hex_grid_kv_value: String::new(),
-            hex_grid_tile_json_by_xy: (|| {
-                let mut m = BTreeMap::new();
+            hex_grid_tiles_present: (|| {
+                let mut s = BTreeSet::new();
                 for y in 0..9_i32 {
                     for x in 0..9_i32 {
-                        m.insert((x, y), "{}".to_string());
+                        s.insert((x, y));
                     }
                 }
-                m
+                s
             })(),
 
             pending_armor_modifiers: vec![],
@@ -494,20 +488,18 @@ impl Application for ToolsGui {
                 self.hex_grid_id = None;
                 self.hex_grid_name = "New Hex Grid".to_string();
 
-                // Start fully populated with empty JSON for all in-bounds tiles.
-                let mut m = BTreeMap::new();
+                // Start fully populated (presence-only) for all in-bounds tiles.
+                let mut s = BTreeSet::new();
                 for y in 0..height {
                     for x in 0..width {
-                        m.insert((x, y), "{}".to_string());
+                        s.insert((x, y));
                     }
                 }
-                self.hex_grid_tile_json_by_xy = m;
+                self.hex_grid_tiles_present = s;
 
-                // Clear selection/editor buffers
+                // Clear selection buffers
                 self.hex_grid_selected_x = None;
                 self.hex_grid_selected_y = None;
-                self.hex_grid_kv_key.clear();
-                self.hex_grid_kv_value.clear();
 
                 Command::none()
             }
@@ -556,7 +548,7 @@ impl Application for ToolsGui {
                 //
                 // Resizing behavior:
                 // - Preserve explicit deletions for tiles that were already in-bounds before.
-                // - Auto-populate any *newly in-bounds* coordinates with empty JSON ("{}").
+                // - Auto-populate any *newly in-bounds* coordinates with a tile (presence-only).
                 //
                 // IMPORTANT: parse "old" dimensions before we overwrite the input fields.
                 let old_w = self
@@ -590,8 +582,8 @@ impl Application for ToolsGui {
                     let old_h = old_h.unwrap_or(new_h);
 
                     // First, prune tiles that are now out of bounds.
-                    self.hex_grid_tile_json_by_xy
-                        .retain(|(x, y), _| *x >= 0 && *y >= 0 && *x < new_w && *y < new_h);
+                    self.hex_grid_tiles_present
+                        .retain(|(x, y)| *x >= 0 && *y >= 0 && *x < new_w && *y < new_h);
 
                     // Then, auto-populate tiles that are newly in-bounds due to the resize.
                     // This preserves deletions for tiles that were already in-bounds.
@@ -599,9 +591,7 @@ impl Application for ToolsGui {
                         for x in 0..new_w {
                             let was_in_old_bounds = x < old_w && y < old_h;
                             if !was_in_old_bounds {
-                                self.hex_grid_tile_json_by_xy
-                                    .entry((x, y))
-                                    .or_insert_with(|| "{}".to_string());
+                                self.hex_grid_tiles_present.insert((x, y));
                             }
                         }
                     }
@@ -612,8 +602,6 @@ impl Application for ToolsGui {
                         if x < 0 || y < 0 || x >= new_w || y >= new_h {
                             self.hex_grid_selected_x = None;
                             self.hex_grid_selected_y = None;
-                            self.hex_grid_kv_key.clear();
-                            self.hex_grid_kv_value.clear();
                         }
                     }
 
@@ -630,82 +618,19 @@ impl Application for ToolsGui {
                 self.hex_grid_selected_x = Some(x);
                 self.hex_grid_selected_y = Some(y);
 
-                // Left-clicking an empty coordinate creates a tile with empty JSON.
-                self.hex_grid_tile_json_by_xy
-                    .entry((x, y))
-                    .or_insert_with(|| "{}".to_string());
+                // Left-clicking an empty coordinate creates a tile (presence-only).
+                self.hex_grid_tiles_present.insert((x, y));
 
                 Command::none()
             }
             Message::HexGridTileClear(x, y) => {
                 // Right-click deletes a tile from the grid (make this coordinate empty).
-                self.hex_grid_tile_json_by_xy.remove(&(x, y));
+                self.hex_grid_tiles_present.remove(&(x, y));
 
                 if self.hex_grid_selected_x == Some(x) && self.hex_grid_selected_y == Some(y) {
                     self.hex_grid_selected_x = None;
                     self.hex_grid_selected_y = None;
-                    self.hex_grid_kv_key.clear();
-                    self.hex_grid_kv_value.clear();
                 }
-
-                Command::none()
-            }
-            Message::HexGridKvKeyChanged(v) => {
-                self.hex_grid_kv_key = v;
-                Command::none()
-            }
-            Message::HexGridKvValueChanged(v) => {
-                self.hex_grid_kv_value = v;
-                Command::none()
-            }
-            Message::HexGridAppendKvToSelectedTile => {
-                let (Some(x), Some(y)) = (self.hex_grid_selected_x, self.hex_grid_selected_y)
-                else {
-                    self.status = Some("Select a tile first".to_string());
-                    return Command::none();
-                };
-
-                let key = self.hex_grid_kv_key.trim();
-                if key.is_empty() {
-                    self.status = Some("Key cannot be empty".to_string());
-                    return Command::none();
-                }
-
-                // For now, treat the value as a JSON string literal by default.
-                // If you later want smarter parsing (numbers/bools/objects), do it here.
-                let value_str = self.hex_grid_kv_value.trim();
-                let value_json = format!(
-                    "\"{}\"",
-                    value_str.replace('\\', "\\\\").replace('"', "\\\"")
-                );
-
-                let current = self
-                    .hex_grid_tile_json_by_xy
-                    .get(&(x, y))
-                    .map(|s| s.as_str())
-                    .unwrap_or("{}")
-                    .trim();
-
-                // Extremely small JSON "object insert" helper:
-                // - If current is `{}` -> `{ "k": "v" }`
-                // - If current starts with `{` and ends with `}` -> insert before final `}`
-                // - Otherwise, replace with a new object
-                let updated = if current == "{}" {
-                    format!("{{\"{}\":{}}}", key, value_json)
-                } else if current.starts_with('{') && current.ends_with('}') {
-                    let inner = &current[1..current.len() - 1].trim();
-                    if inner.is_empty() {
-                        format!("{{\"{}\":{}}}", key, value_json)
-                    } else {
-                        format!("{{{},\"{}\":{}}}", inner, key, value_json)
-                    }
-                } else {
-                    format!("{{\"{}\":{}}}", key, value_json)
-                };
-
-                self.hex_grid_tile_json_by_xy.insert((x, y), updated);
-                self.hex_grid_kv_key.clear();
-                self.hex_grid_kv_value.clear();
 
                 Command::none()
             }
@@ -1573,22 +1498,21 @@ impl ToolsGui {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
 
-        // Load tiles
+        // Load tile presence
         let mut stmt = conn.prepare(
             r#"
-            SELECT x, y, COALESCE(user_data_json, '{}')
+            SELECT x, y
             FROM hex_tiles
             WHERE hex_grid_id = ?1
             "#,
         )?;
 
-        let mut tile_map: BTreeMap<(i32, i32), String> = BTreeMap::new();
+        let mut present: BTreeSet<(i32, i32)> = BTreeSet::new();
         let mut rows = stmt.query(rusqlite::params![id])?;
         while let Some(r) = rows.next()? {
             let x: i32 = r.get(0)?;
             let y: i32 = r.get(1)?;
-            let json: String = r.get(2)?;
-            tile_map.insert((x, y), json);
+            present.insert((x, y));
         }
 
         // Update editor state
@@ -1596,13 +1520,11 @@ impl ToolsGui {
         self.hex_grid_name = name;
         self.hex_grid_width = width.to_string();
         self.hex_grid_height = height.to_string();
-        self.hex_grid_tile_json_by_xy = tile_map;
+        self.hex_grid_tiles_present = present;
 
-        // Clear selection/editor kv buffer
+        // Clear selection buffers
         self.hex_grid_selected_x = None;
         self.hex_grid_selected_y = None;
-        self.hex_grid_kv_key.clear();
-        self.hex_grid_kv_value.clear();
 
         Ok(())
     }
@@ -1641,8 +1563,12 @@ impl ToolsGui {
             bail!("Width/height must be > 0");
         }
 
-        let conn = self.open_conn()?;
-        let tx = conn.unchecked_transaction()?;
+        let mut conn = self.open_conn()?;
+
+        // Use a normal transaction.
+        // `unchecked_transaction()` can trigger "cannot start a transaction within a transaction"
+        // in some situations (e.g. if the connection is already in a transaction).
+        let tx = conn.transaction()?;
 
         // Save the hex grid row.
         //
@@ -1669,8 +1595,6 @@ impl ToolsGui {
 
             id
         } else {
-            // Attempt to locate an existing grid by name. This will fail if the `name` column
-            // does not exist yet; in that case, we surface a clear error telling you to apply migrations.
             let existing_id: Option<i64> = tx
                 .query_row(
                     r#"SELECT id FROM hex_grids WHERE name = ?1"#,
@@ -1719,12 +1643,12 @@ impl ToolsGui {
         )
         .with_context(|| "Delete out-of-bounds hex tiles")?;
 
-        // Sync tiles:
-        // - For every present tile in the editor map, upsert the row.
-        // - For every in-bounds coordinate missing from the map, delete the row (empty space).
+        // Sync tile presence:
+        // - For every present tile in the editor set, upsert the row.
+        // - For every in-bounds coordinate missing from the set, delete the row (empty space).
         let mut seen = std::collections::HashSet::<(i32, i32)>::new();
 
-        for (&(x, y), json) in self.hex_grid_tile_json_by_xy.iter() {
+        for &(x, y) in self.hex_grid_tiles_present.iter() {
             if x < 0 || y < 0 || x >= width || y >= height {
                 continue;
             }
@@ -1732,20 +1656,17 @@ impl ToolsGui {
 
             tx.execute(
                 r#"
-                INSERT INTO hex_tiles (hex_grid_id, x, y, user_data_json)
-                VALUES (?1, ?2, ?3, ?4)
+                INSERT INTO hex_tiles (hex_grid_id, x, y)
+                VALUES (?1, ?2, ?3)
                 ON CONFLICT(hex_grid_id, x, y)
                 DO UPDATE SET
-                    user_data_json = excluded.user_data_json,
                     updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                 "#,
-                rusqlite::params![grid_id, x, y, json],
+                rusqlite::params![grid_id, x, y],
             )
             .with_context(|| format!("Upsert hex tile ({x},{y})"))?;
         }
 
-        // Delete all tiles in-bounds that are not in `seen`.
-        // This can be a bit heavier for large grids, but is simple/correct for now.
         for y in 0..height {
             for x in 0..width {
                 if !seen.contains(&(x, y)) {

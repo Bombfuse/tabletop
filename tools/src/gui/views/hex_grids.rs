@@ -58,7 +58,7 @@ pub fn view(gui: &ToolsGui) -> Element<'_, Message> {
 
     // Main editing area:
     // - Left: the canvas (should keep as much space as possible)
-    // - Right: the list sidebar (scrollable) + tile editor
+    // - Right: the list sidebar (scrollable) + tile presence inspector
     let grid = hex_grid_canvas(gui);
     let editor = selected_tile_editor(gui);
     let list = existing_hex_grids_list(gui);
@@ -150,25 +150,13 @@ fn hex_grid_canvas(gui: &ToolsGui) -> Element<'_, Message> {
 
     // The canvas is the pan/scroll surface:
     // - Mouse wheel scrolls vertically.
-    // - Shift+wheel scrolls horizontally.
-    // - Click+drag pans in both axes.
+    // - Trackpad horizontal scroll pans horizontally.
+    // - Middle-click drag pans in both axes.
     //
     // Keep the canvas viewport relative to the page by using Fill for width/height.
     // The canvas content is larger than the viewport; the Program translates it.
     let radius = 16.0_f32;
     let padding = 14.0_f32;
-
-    // Pointy-top hex:
-    // - hex width = sqrt(3) * r
-    // - hex height = 2r
-    // - vertical step between rows = 1.5r
-    // - horizontal step between cols = sqrt(3) * r
-    let hex_w = (3.0_f32).sqrt() * radius;
-    let _hex_h = 2.0_f32 * radius;
-    let _step_x = hex_w;
-    let _step_y = 1.5_f32 * radius;
-
-    // odd-r layout shifts odd rows by half a column
 
     let program = HexGridProgram::new(
         w,
@@ -177,11 +165,9 @@ fn hex_grid_canvas(gui: &ToolsGui) -> Element<'_, Message> {
         padding,
         gui.hex_grid_selected_x,
         gui.hex_grid_selected_y,
-        &gui.hex_grid_tile_json_by_xy,
+        &gui.hex_grid_tiles_present,
     );
 
-    // The Canvas is given the available size (relative to the app page).
-    // The Program will clamp panning based on `bounds` vs content size.
     container(
         Canvas::new(program)
             .width(Length::Fill)
@@ -194,19 +180,19 @@ fn hex_grid_canvas(gui: &ToolsGui) -> Element<'_, Message> {
 }
 
 fn selected_tile_editor(gui: &ToolsGui) -> Element<'_, Message> {
-    let title = text("Tile JSON").size(18);
+    let title = text("Tile").size(18);
 
     let Some(x) = gui.hex_grid_selected_x else {
         return container(
             column![
                 title,
                 horizontal_rule(1),
-                text("Click a hex tile to edit its JSON.").size(14),
+                text("Click a hex tile to see if it is present.").size(14),
             ]
             .spacing(10),
         )
         .padding(12)
-        .width(Length::FillPortion(1))
+        .width(Length::Fill)
         .into();
     };
     let Some(y) = gui.hex_grid_selected_y else {
@@ -214,62 +200,31 @@ fn selected_tile_editor(gui: &ToolsGui) -> Element<'_, Message> {
             column![
                 title,
                 horizontal_rule(1),
-                text("Click a hex tile to edit its JSON.").size(14),
+                text("Click a hex tile to see if it is present.").size(14),
             ]
             .spacing(10),
         )
         .padding(12)
-        .width(Length::FillPortion(1))
+        .width(Length::Fill)
         .into();
     };
 
-    let existing = gui
-        .hex_grid_tile_json_by_xy
-        .get(&(x, y))
-        .map(|s| s.as_str())
-        .unwrap_or("{}");
+    let present = gui.hex_grid_tiles_present.contains(&(x, y));
 
-    let kv_form = column![
+    let body = column![
         text(format!("Selected: ({x},{y})")).size(14),
-        text("Existing JSON:").size(14),
-        container(text(existing).size(13))
-            .padding(8)
-            .width(Length::Fill)
-            .style(iced::theme::Container::Box),
+        text(format!("Present: {}", if present { "yes" } else { "no" })).size(14),
         row![
-            column![
-                text("Key").size(14),
-                text_input("e.g. terrain", &gui.hex_grid_kv_key)
-                    .on_input(Message::HexGridKvKeyChanged)
-                    .padding(8),
-            ]
-            .spacing(6)
-            .width(Length::Fill),
-            column![
-                text("Value").size(14),
-                text_input("e.g. forest", &gui.hex_grid_kv_value)
-                    .on_input(Message::HexGridKvValueChanged)
-                    .padding(8),
-            ]
-            .spacing(6)
-            .width(Length::Fill),
+            button("Paint tile").on_press(Message::HexGridTileClicked(x, y)),
+            button("Delete tile").on_press(Message::HexGridTileClear(x, y)),
         ]
         .spacing(12),
-        row![
-            button("Append key/value").on_press(Message::HexGridAppendKvToSelectedTile),
-            button("Clear tile").on_press(Message::HexGridTileClear(x, y)),
-        ]
-        .spacing(12),
-        text(
-            "Values are appended as JSON strings. You can extend parsing later for numbers/bools/objects.",
-        )
-        .size(12),
     ]
     .spacing(10);
 
-    container(column![title, horizontal_rule(1), kv_form].spacing(10))
+    container(column![title, horizontal_rule(1), body].spacing(10))
         .padding(12)
-        .width(Length::FillPortion(1))
+        .width(Length::Fill)
         .into()
 }
 
@@ -296,7 +251,7 @@ struct HexGridProgram {
     selected_x: Option<i32>,
     selected_y: Option<i32>,
 
-    /// Present tiles (x,y) -> JSON payload
+    /// Present tiles (x,y)
     present: std::collections::BTreeSet<(i32, i32)>,
 
     cache: Cache,
@@ -310,9 +265,9 @@ impl HexGridProgram {
         padding: f32,
         selected_x: Option<i32>,
         selected_y: Option<i32>,
-        tile_json_by_xy: &std::collections::BTreeMap<(i32, i32), String>,
+        tiles_present: &std::collections::BTreeSet<(i32, i32)>,
     ) -> Self {
-        let present = tile_json_by_xy.keys().copied().collect();
+        let present = tiles_present.iter().copied().collect();
         Self {
             w,
             h,

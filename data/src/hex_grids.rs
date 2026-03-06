@@ -3,8 +3,8 @@
 //! This module is self-contained so you can unit test persistence against an in-memory SQLite DB.
 //!
 //! Schema assumptions (created by migration):
-//! - `hex_grids(id, width, height, created_at, updated_at)`
-//! - `hex_tiles(id, hex_grid_id, x, y, user_data_json, created_at, updated_at)`
+//! - `hex_grids(id, name, width, height, created_at, updated_at)`
+//! - `hex_tiles(id, hex_grid_id, x, y, created_at, updated_at)`
 //!
 //! Notes on semantics:
 //! - A "tile space" exists for every (x,y) within the grid bounds, but it may be empty.
@@ -37,8 +37,6 @@ impl HexCoord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HexTile {
     pub coord: HexCoord,
-    /// Arbitrary user JSON payload stored as text. (Not validated here.)
-    pub user_data_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,27 +126,20 @@ impl HexGrid {
 
     /// Add/replace a tile at `coord`.
     ///
-    /// - If `user_data_json` is `None`, this still creates a tile row (i.e. a populated tile with
-    ///   no user data yet). If you want it empty, call `remove_tile`.
-    pub fn put_tile(
-        &self,
-        conn: &Connection,
-        coord: HexCoord,
-        user_data_json: Option<&str>,
-    ) -> Result<()> {
+    /// This creates a tile row (presence-only). If you want it empty, call `remove_tile`.
+    pub fn put_tile(&self, conn: &Connection, coord: HexCoord) -> Result<()> {
         self.require_contains(coord)?;
         let grid_id = self.require_id()?;
 
         conn.execute(
             r#"
-            INSERT INTO hex_tiles (hex_grid_id, x, y, user_data_json)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO hex_tiles (hex_grid_id, x, y)
+            VALUES (?1, ?2, ?3)
             ON CONFLICT(hex_grid_id, x, y)
             DO UPDATE SET
-                user_data_json = excluded.user_data_json,
                 updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             "#,
-            params![grid_id, coord.x, coord.y, user_data_json],
+            params![grid_id, coord.x, coord.y],
         )?;
         Ok(())
     }
@@ -175,7 +166,7 @@ impl HexGrid {
         let tile = conn
             .query_row(
                 r#"
-                SELECT x, y, user_data_json
+                SELECT x, y
                 FROM hex_tiles
                 WHERE hex_grid_id = ?1 AND x = ?2 AND y = ?3
                 "#,
@@ -183,7 +174,6 @@ impl HexGrid {
                 |r| {
                     Ok(HexTile {
                         coord: HexCoord::new(r.get::<_, i32>(0)?, r.get::<_, i32>(1)?),
-                        user_data_json: r.get::<_, Option<String>>(2)?,
                     })
                 },
             )
@@ -197,7 +187,7 @@ impl HexGrid {
 
         let mut stmt = conn.prepare(
             r#"
-            SELECT x, y, user_data_json
+            SELECT x, y
             FROM hex_tiles
             WHERE hex_grid_id = ?1
             ORDER BY y ASC, x ASC
@@ -209,7 +199,6 @@ impl HexGrid {
         while let Some(r) = rows.next()? {
             out.push(HexTile {
                 coord: HexCoord::new(r.get::<_, i32>(0)?, r.get::<_, i32>(1)?),
-                user_data_json: r.get::<_, Option<String>>(2)?,
             });
         }
         Ok(out)
@@ -261,7 +250,6 @@ mod tests {
                 hex_grid_id    INTEGER NOT NULL,
                 x              INTEGER NOT NULL,
                 y              INTEGER NOT NULL,
-                user_data_json TEXT NULL,
 
                 created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -316,9 +304,7 @@ mod tests {
                 let coord = HexCoord::new(x, y);
 
                 if keep {
-                    // Give each kept tile a tiny JSON payload.
-                    let json = format!(r#"{{"x":{},"y":{}}}"#, x, y);
-                    grid.put_tile(conn, coord, Some(&json))?;
+                    grid.put_tile(conn, coord)?;
                 } else {
                     grid.remove_tile(conn, coord)?;
                 }
@@ -350,10 +336,7 @@ mod tests {
         let center = HexCoord::new(3, 3);
         let t = loaded.get_tile(&conn, center)?;
         assert!(t.is_some());
-        assert_eq!(
-            t.unwrap().user_data_json.as_deref(),
-            Some(r#"{"x":3,"y":3}"#)
-        );
+        assert_eq!(t.unwrap().coord, center);
 
         // A corner should be empty (removed).
         let corner = HexCoord::new(0, 0);
@@ -365,13 +348,10 @@ mod tests {
         assert!(!tiles.is_empty());
         assert!(tiles.len() < (loaded.width * loaded.height) as usize);
 
-        // Replace a tile payload and ensure it updates
-        loaded.put_tile(&conn, center, Some(r#"{"hello":"world"}"#))?;
+        // Re-put a tile and ensure it still exists (idempotent upsert)
+        loaded.put_tile(&conn, center)?;
         let t2 = loaded.get_tile(&conn, center)?;
-        assert_eq!(
-            t2.unwrap().user_data_json.as_deref(),
-            Some(r#"{"hello":"world"}"#)
-        );
+        assert!(t2.is_some());
 
         // Remove a tile and ensure it disappears
         loaded.remove_tile(&conn, center)?;
@@ -389,9 +369,7 @@ mod tests {
         let mut grid = HexGrid::generate("bounds-grid", 3, 2)?;
         grid.insert(&conn)?;
 
-        let err = grid
-            .put_tile(&conn, HexCoord::new(3, 0), Some(r#"{}"#))
-            .unwrap_err();
+        let err = grid.put_tile(&conn, HexCoord::new(3, 0)).unwrap_err();
         assert!(err.to_string().contains("out of bounds"));
 
         let err = grid.remove_tile(&conn, HexCoord::new(0, 2)).unwrap_err();
