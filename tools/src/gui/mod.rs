@@ -1,8 +1,9 @@
+mod shared;
 mod views;
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use iced::widget::{button, column, container, horizontal_rule, row, text};
 use iced::{Application, Command, Element, Length, Settings, Subscription, Theme};
 
@@ -34,6 +35,7 @@ pub enum Tab {
     Items,
     Levels,
     Actions,
+    ArmorModifiers,
 }
 
 impl Tab {
@@ -43,6 +45,7 @@ impl Tab {
             Tab::Items => "Items",
             Tab::Levels => "Levels",
             Tab::Actions => "Actions",
+            Tab::ArmorModifiers => "Armor Modifiers",
         }
     }
 }
@@ -54,6 +57,7 @@ pub enum ActiveView {
     EditItem { original_name: String },
     EditLevel { original_name: String },
     EditAction { original_name: String },
+    EditArmorModifier { id: i64 },
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +66,33 @@ pub enum Message {
     SwitchTab(Tab),
 
     Refresh,
+
+    // Armor modifiers form (single "draft" row editor)
+    ArmorModifierValueChanged(String),
+    ArmorModifierSuitChanged(String),
+    ArmorModifierDamageTypeChanged(String),
+
+    // Pending armor modifiers (used by create-card flows)
+    AddPendingArmorModifier,
+    RemovePendingArmorModifier(usize),
+    ClearPendingArmorModifiers,
+
+    // Create an armor modifier in the context of the current view:
+    // - If editing an Item, it will be linked to that Item.
+    // - If editing a Level, it will be linked to that Level.
+    // - Otherwise, creation is rejected (prevents unassociated modifiers).
+    CreateArmorModifier,
+
+    // De-link an armor modifier from its associated card (item/level).
+    // The armor modifier row remains, but the association link row is removed.
+    RemoveArmorModifierLink(i64),
+
+    // Armor modifiers edit navigation
+    EditArmorModifier(i64),
+
+    // Armor modifiers save/delete
+    SaveArmorModifierEdits,
+    DeleteArmorModifier(i64),
 
     // Units form
     UnitNameChanged(String),
@@ -181,6 +212,19 @@ pub struct ActionRow {
     pub level_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmorModifierRow {
+    pub id: i64,
+    pub card_id: i64,
+    pub value: i64,
+    pub suit: String,
+    pub damage_type: String,
+
+    // Optional association (at most one should be Some at a time, or all None).
+    pub item_name: Option<String>,
+    pub level_name: Option<String>,
+}
+
 pub struct ToolsGui {
     pub tab: Tab,
 
@@ -230,11 +274,20 @@ pub struct ToolsGui {
     pub interaction_skill: String,
     pub interaction_target: String,
 
+    // Armor modifiers form / edit buffer (single draft row)
+    pub armor_modifier_value: String,
+    pub armor_modifier_suit: String,
+    pub armor_modifier_damage_type: String,
+
+    // Pending armor modifiers (used by create-card flows; linked on create)
+    pub pending_armor_modifiers: Vec<app::cards::armor_modifier::ArmorModifier>,
+
     // loaded data
     pub units: Vec<UnitRow>,
     pub items: Vec<ItemRow>,
     pub levels: Vec<LevelRow>,
     pub actions: Vec<ActionRow>,
+    pub armor_modifiers: Vec<ArmorModifierRow>,
 
     // ui state
     pub status: Option<String>,
@@ -288,10 +341,17 @@ impl Default for ToolsGui {
             interaction_skill: "Strength".to_string(),
             interaction_target: "".to_string(),
 
+            armor_modifier_value: "0".to_string(),
+            armor_modifier_suit: "Spades".to_string(),
+            armor_modifier_damage_type: "Physical".to_string(),
+
+            pending_armor_modifiers: vec![],
+
             units: vec![],
             items: vec![],
             levels: vec![],
             actions: vec![],
+            armor_modifiers: vec![],
 
             status: None,
             active_view: ActiveView::List,
@@ -333,6 +393,91 @@ impl Application for ToolsGui {
                 self.tab = tab;
                 self.active_view = ActiveView::List;
                 Command::none()
+            }
+
+            Message::ArmorModifierValueChanged(v) => {
+                self.armor_modifier_value = v;
+                Command::none()
+            }
+            Message::ArmorModifierSuitChanged(v) => {
+                self.armor_modifier_suit = v;
+                Command::none()
+            }
+            Message::ArmorModifierDamageTypeChanged(v) => {
+                self.armor_modifier_damage_type = v;
+                Command::none()
+            }
+
+            Message::AddPendingArmorModifier => {
+                if let Err(e) = self.add_pending_armor_modifier_from_form() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Armor modifier queued".to_string());
+                    self.armor_modifier_value = "0".to_string();
+                    self.armor_modifier_suit = "Spades".to_string();
+                    self.armor_modifier_damage_type = "Physical".to_string();
+                }
+                Command::none()
+            }
+            Message::RemovePendingArmorModifier(idx) => {
+                if idx < self.pending_armor_modifiers.len() {
+                    self.pending_armor_modifiers.remove(idx);
+                }
+                Command::none()
+            }
+            Message::ClearPendingArmorModifiers => {
+                self.pending_armor_modifiers.clear();
+                Command::none()
+            }
+
+            Message::CreateArmorModifier => {
+                // Create + associate in one step, based on the current edit context.
+                if let Err(e) = self.create_armor_modifier_from_form() {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some("Armor modifier created".to_string());
+                    self.armor_modifier_value = "0".to_string();
+                    self.armor_modifier_suit = "Spades".to_string();
+                    self.armor_modifier_damage_type = "Physical".to_string();
+                }
+                Command::perform(async {}, |_| Message::Refresh)
+            }
+
+            Message::RemoveArmorModifierLink(id) => {
+                if let Err(e) = self.remove_armor_modifier_link(id) {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some(format!("Removed armor modifier link (id={id})"));
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+
+            Message::EditArmorModifier(id) => {
+                if let Err(e) = self.begin_edit_armor_modifier(id) {
+                    self.status = Some(format!("{e:#}"));
+                }
+                Command::none()
+            }
+
+            Message::SaveArmorModifierEdits => {
+                if let Err(e) = self.save_armor_modifier_edits() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Armor modifier updated".to_string());
+                    self.active_view = ActiveView::List;
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+
+            Message::DeleteArmorModifier(id) => {
+                if let Err(e) = self.delete_armor_modifier(id) {
+                    self.status = Some(format!("{e:#}"));
+                } else {
+                    self.status = Some(format!("Deleted armor modifier id={id}"));
+                }
+                Command::perform(async {}, |_| Message::Refresh)
             }
 
             Message::Refresh => {
@@ -439,6 +584,7 @@ impl Application for ToolsGui {
                     self.status = Some("Item created".to_string());
                     self.item_name.clear();
                     self.item_assoc_action_name.clear();
+                    self.pending_armor_modifiers.clear();
                 }
                 Command::perform(async {}, |_| Message::Refresh)
             }
@@ -494,6 +640,7 @@ impl Application for ToolsGui {
                     self.level_name.clear();
                     self.level_text.clear();
                     self.level_assoc_action_name.clear();
+                    self.pending_armor_modifiers.clear();
                 }
                 Command::perform(async {}, |_| Message::Refresh)
             }
@@ -754,6 +901,7 @@ impl Application for ToolsGui {
             views::tab_button(self.tab, Tab::Items),
             views::tab_button(self.tab, Tab::Levels),
             views::tab_button(self.tab, Tab::Actions),
+            views::tab_button(self.tab, Tab::ArmorModifiers),
             iced::widget::Space::with_width(Length::Fill),
         ]
         .spacing(8);
@@ -788,6 +936,13 @@ impl Application for ToolsGui {
                     views::actions::edit_view(self, original_name)
                 }
                 _ => views::actions::view(self),
+            },
+            Tab::ArmorModifiers => match &self.active_view {
+                ActiveView::List => views::armor_modifiers::view(self),
+                ActiveView::EditArmorModifier { id } => {
+                    views::armor_modifiers::edit_view(self, *id)
+                }
+                _ => views::armor_modifiers::view(self),
             },
         };
 
@@ -833,6 +988,178 @@ impl ToolsGui {
         Ok((tabletop_dir, db_path, migrations_dir))
     }
 
+    fn create_armor_modifier_from_form(&self) -> Result<()> {
+        // CardId is not user-editable. It is derived from the current edit context:
+        // - Item edit: card_id = items.id, and we link to the item
+        // - Level edit: card_id = levels.id, and we link to the level
+        //
+        // For create-card flows, armor modifiers are queued via `AddPendingArmorModifier` and
+        // persisted+linked when the card is created.
+        let mut conn = self.open_conn()?;
+
+        let value =
+            shared::form_parsing::parse_i64_required("Value", self.armor_modifier_value.trim())?;
+
+        let suit = app::cards::armor_modifier::Suit::parse(self.armor_modifier_suit.trim())
+            .context("Invalid Suit (expected Spades, Clubs, Diamonds, or Hearts)")?;
+
+        let damage_type =
+            app::cards::armor_modifier::DamageType::parse(self.armor_modifier_damage_type.trim())
+                .context("Invalid DamageType (expected Arcane or Physical)")?;
+
+        match &self.active_view {
+            ActiveView::EditItem { original_name } => {
+                // Derive CardId from the DB item row id.
+                let item_id: i64 = conn
+                    .query_row(
+                        r#"
+                        SELECT id
+                        FROM items
+                        WHERE name = ?1
+                        "#,
+                        rusqlite::params![original_name],
+                        |r| r.get(0),
+                    )
+                    .with_context(|| format!("Lookup item id for `{original_name}`"))?;
+
+                let armor = app::cards::armor_modifier::ArmorModifier {
+                    card_id: item_id,
+                    value,
+                    suit,
+                    damage_type,
+                };
+
+                // Create + link (allows multiple per card).
+                app::cards::armor_modifier::create_and_link_to_item_by_name(
+                    &mut conn,
+                    &armor,
+                    original_name,
+                )?;
+
+                Ok(())
+            }
+
+            ActiveView::EditLevel { original_name } => {
+                // Derive CardId from the DB level row id.
+                let level_id: i64 = conn
+                    .query_row(
+                        r#"
+                        SELECT id
+                        FROM levels
+                        WHERE name = ?1
+                        "#,
+                        rusqlite::params![original_name],
+                        |r| r.get(0),
+                    )
+                    .with_context(|| format!("Lookup level id for `{original_name}`"))?;
+
+                let armor = app::cards::armor_modifier::ArmorModifier {
+                    card_id: level_id,
+                    value,
+                    suit,
+                    damage_type,
+                };
+
+                // Create + link (allows multiple per card).
+                app::cards::armor_modifier::create_and_link_to_level_by_name(
+                    &mut conn,
+                    &armor,
+                    original_name,
+                )?;
+
+                Ok(())
+            }
+
+            _ => bail!(
+                "From create-card views, queue armor modifiers with 'AddPendingArmorModifier' and they will be saved when the card is created"
+            ),
+        }
+    }
+
+    fn begin_edit_armor_modifier(&mut self, id: i64) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        let Some(row) = app::cards::armor_modifier::get_by_id(&conn, id)? else {
+            bail!("Armor modifier not found (id={id})");
+        };
+
+        self.armor_modifier_value = row.value.to_string();
+        self.armor_modifier_suit = row.suit.as_str().to_string();
+        self.armor_modifier_damage_type = row.damage_type.as_str().to_string();
+
+        self.active_view = ActiveView::EditArmorModifier { id };
+        Ok(())
+    }
+
+    fn save_armor_modifier_edits(&self) -> Result<()> {
+        let conn = self.open_conn()?;
+
+        let ActiveView::EditArmorModifier { id } = &self.active_view else {
+            bail!("Not currently editing an armor modifier");
+        };
+
+        let value =
+            shared::form_parsing::parse_i64_required("Value", self.armor_modifier_value.trim())?;
+
+        let suit = app::cards::armor_modifier::Suit::parse(self.armor_modifier_suit.trim())
+            .context("Invalid Suit (expected Spades, Clubs, Diamonds, or Hearts)")?;
+
+        let damage_type =
+            app::cards::armor_modifier::DamageType::parse(self.armor_modifier_damage_type.trim())
+                .context("Invalid DamageType (expected Arcane or Physical)")?;
+
+        // Preserve the existing CardId (non-editable).
+        let Some(existing) = app::cards::armor_modifier::get_by_id(&conn, *id)? else {
+            bail!("Armor modifier not found (id={id})");
+        };
+
+        let armor = app::cards::armor_modifier::ArmorModifier {
+            card_id: existing.card_id,
+            value,
+            suit,
+            damage_type,
+        };
+
+        app::cards::armor_modifier::update_by_id(&conn, *id, &armor)?;
+        Ok(())
+    }
+
+    fn delete_armor_modifier(&self, id: i64) -> Result<()> {
+        let conn = self.open_conn()?;
+        app::cards::armor_modifier::delete_by_id(&conn, id)?;
+        Ok(())
+    }
+
+    fn remove_armor_modifier_link(&self, id: i64) -> Result<()> {
+        let conn = self.open_conn()?;
+        app::cards::armor_modifier::clear_association(&conn, id)?;
+        Ok(())
+    }
+
+    fn add_pending_armor_modifier_from_form(&mut self) -> Result<()> {
+        // In create-card views, we don't have an item/level id yet.
+        // Queue the modifier with a placeholder CardId; it will be overwritten at persist time
+        // by `create_and_link_to_*` (which derives CardId from the linked card).
+        let value =
+            shared::form_parsing::parse_i64_required("Value", self.armor_modifier_value.trim())?;
+        let suit = app::cards::armor_modifier::Suit::parse(self.armor_modifier_suit.trim())
+            .context("Invalid Suit (expected Spades, Clubs, Diamonds, or Hearts)")?;
+
+        let damage_type =
+            app::cards::armor_modifier::DamageType::parse(self.armor_modifier_damage_type.trim())
+                .context("Invalid DamageType (expected Arcane or Physical)")?;
+
+        self.pending_armor_modifiers
+            .push(app::cards::armor_modifier::ArmorModifier {
+                card_id: 0,
+                value,
+                suit,
+                damage_type,
+            });
+
+        Ok(())
+    }
+
     fn ensure_db_ready(&self) -> Result<()> {
         let (tabletop_dir, db_path, migrations_dir) = self.resolve_paths()?;
 
@@ -875,19 +1202,9 @@ impl ToolsGui {
         self.items = views::items::list_items(&conn)?;
         self.levels = views::levels::list_levels(&conn)?;
         self.actions = views::actions::list_actions(&conn)?;
+        self.armor_modifiers = views::armor_modifiers::list_armor_modifiers(&conn)?;
 
         Ok(())
-    }
-
-    fn parse_i64_field(label: &str, s: &str) -> Result<i64> {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!("{label} must not be empty");
-        }
-        let v: i64 = trimmed
-            .parse()
-            .with_context(|| format!("{label} must be an integer"))?;
-        Ok(v)
     }
 
     fn create_unit_from_form(&self) -> Result<()> {
@@ -895,11 +1212,14 @@ impl ToolsGui {
 
         let unit = app::cards::unit::Unit {
             name: self.unit_name.trim().to_string(),
-            strength: Self::parse_i64_field("Strength", &self.unit_strength)?,
-            focus: Self::parse_i64_field("Focus", &self.unit_focus)?,
-            intelligence: Self::parse_i64_field("Intelligence", &self.unit_intelligence)?,
-            agility: Self::parse_i64_field("Agility", &self.unit_agility)?,
-            knowledge: Self::parse_i64_field("Knowledge", &self.unit_knowledge)?,
+            strength: shared::form_parsing::parse_i64_required("Strength", &self.unit_strength)?,
+            focus: shared::form_parsing::parse_i64_required("Focus", &self.unit_focus)?,
+            intelligence: shared::form_parsing::parse_i64_required(
+                "Intelligence",
+                &self.unit_intelligence,
+            )?,
+            agility: shared::form_parsing::parse_i64_required("Agility", &self.unit_agility)?,
+            knowledge: shared::form_parsing::parse_i64_required("Knowledge", &self.unit_knowledge)?,
         };
 
         app::cards::unit::save_card(&conn, &unit)?;
@@ -911,11 +1231,14 @@ impl ToolsGui {
 
         let unit = app::cards::unit::Unit {
             name: self.unit_name.trim().to_string(),
-            strength: Self::parse_i64_field("Strength", &self.unit_strength)?,
-            focus: Self::parse_i64_field("Focus", &self.unit_focus)?,
-            intelligence: Self::parse_i64_field("Intelligence", &self.unit_intelligence)?,
-            agility: Self::parse_i64_field("Agility", &self.unit_agility)?,
-            knowledge: Self::parse_i64_field("Knowledge", &self.unit_knowledge)?,
+            strength: shared::form_parsing::parse_i64_required("Strength", &self.unit_strength)?,
+            focus: shared::form_parsing::parse_i64_required("Focus", &self.unit_focus)?,
+            intelligence: shared::form_parsing::parse_i64_required(
+                "Intelligence",
+                &self.unit_intelligence,
+            )?,
+            agility: shared::form_parsing::parse_i64_required("Agility", &self.unit_agility)?,
+            knowledge: shared::form_parsing::parse_i64_required("Knowledge", &self.unit_knowledge)?,
         };
 
         let unit_name = unit.name.clone();
@@ -943,7 +1266,7 @@ impl ToolsGui {
     }
 
     fn create_item_and_maybe_associate_from_form(&self) -> Result<()> {
-        let conn = self.open_conn()?;
+        let mut conn = self.open_conn()?;
 
         let item = app::cards::item::Item {
             name: self.item_name.trim().to_string(),
@@ -957,7 +1280,17 @@ impl ToolsGui {
             app::cards::action::set_association(
                 &conn,
                 action_name,
-                &app::cards::action::ActionAssociation::Item { item_name },
+                &app::cards::action::ActionAssociation::Item {
+                    item_name: item_name.clone(),
+                },
+            )?;
+        }
+
+        // Persist any queued armor modifiers now that the item exists.
+        // CardId is derived from items.id and the modifier is linked to this item.
+        for pending in &self.pending_armor_modifiers {
+            let _id = app::cards::armor_modifier::create_and_link_to_item_by_name(
+                &mut conn, pending, &item_name,
             )?;
         }
 
@@ -977,7 +1310,7 @@ impl ToolsGui {
     }
 
     fn create_level_and_maybe_associate_from_form(&self) -> Result<()> {
-        let conn = self.open_conn()?;
+        let mut conn = self.open_conn()?;
 
         let level = app::cards::level::Level {
             name: self.level_name.trim().to_string(),
@@ -992,7 +1325,19 @@ impl ToolsGui {
             app::cards::action::set_association(
                 &conn,
                 action_name,
-                &app::cards::action::ActionAssociation::Level { level_name },
+                &app::cards::action::ActionAssociation::Level {
+                    level_name: level_name.clone(),
+                },
+            )?;
+        }
+
+        // Persist any queued armor modifiers now that the level exists.
+        // CardId is derived from levels.id and the modifier is linked to this level.
+        for pending in &self.pending_armor_modifiers {
+            let _id = app::cards::armor_modifier::create_and_link_to_level_by_name(
+                &mut conn,
+                pending,
+                &level_name,
             )?;
         }
 
@@ -1003,7 +1348,7 @@ impl ToolsGui {
         let conn = self.open_conn()?;
 
         let action_point_cost =
-            Self::parse_i64_field("Action Point Cost", &self.action_point_cost)?;
+            shared::form_parsing::parse_i64_required("Action Point Cost", &self.action_point_cost)?;
         let action_type = match self.action_type.trim() {
             "Interaction" => app::cards::action::ActionType::Interaction,
             "Attack" => app::cards::action::ActionType::Attack,
@@ -1029,9 +1374,11 @@ impl ToolsGui {
         // 2) Create exactly one subtype row, based on Action.action_type.
         match action.action_type {
             app::cards::action::ActionType::Attack => {
-                let damage = Self::parse_i64_field("Damage", &self.attack_damage)?;
-                let range = Self::parse_i64_field("Range", &self.attack_range)?;
-                let target = Self::parse_i64_field("Target", &self.attack_target)?;
+                let damage =
+                    shared::form_parsing::parse_i64_required("Damage", &self.attack_damage)?;
+                let range = shared::form_parsing::parse_i64_required("Range", &self.attack_range)?;
+                let target =
+                    shared::form_parsing::parse_i64_required("Target", &self.attack_target)?;
 
                 let damage_type = match self.attack_damage_type.trim() {
                     "Arcane" => app::cards::attack::DamageType::Arcane,
@@ -1064,8 +1411,10 @@ impl ToolsGui {
                 let _ = app::cards::attack::save_card(&conn, &atk)?;
             }
             app::cards::action::ActionType::Interaction => {
-                let range = Self::parse_i64_field("Range", &self.interaction_range)?;
-                let target = Self::parse_optional_i64_field("Target", &self.interaction_target)?;
+                let range =
+                    shared::form_parsing::parse_i64_required("Range", &self.interaction_range)?;
+                let target =
+                    shared::form_parsing::parse_i64_optional("Target", &self.interaction_target)?;
 
                 let skill = match self.interaction_skill.trim() {
                     "Strength" => app::cards::interaction::Skill::Strength,
@@ -1261,11 +1610,14 @@ impl ToolsGui {
 
         let unit = app::cards::unit::Unit {
             name: new_name,
-            strength: Self::parse_i64_field("Strength", &self.unit_strength)?,
-            focus: Self::parse_i64_field("Focus", &self.unit_focus)?,
-            intelligence: Self::parse_i64_field("Intelligence", &self.unit_intelligence)?,
-            agility: Self::parse_i64_field("Agility", &self.unit_agility)?,
-            knowledge: Self::parse_i64_field("Knowledge", &self.unit_knowledge)?,
+            strength: shared::form_parsing::parse_i64_required("Strength", &self.unit_strength)?,
+            focus: shared::form_parsing::parse_i64_required("Focus", &self.unit_focus)?,
+            intelligence: shared::form_parsing::parse_i64_required(
+                "Intelligence",
+                &self.unit_intelligence,
+            )?,
+            agility: shared::form_parsing::parse_i64_required("Agility", &self.unit_agility)?,
+            knowledge: shared::form_parsing::parse_i64_required("Knowledge", &self.unit_knowledge)?,
         };
 
         let updated = app::cards::unit::rename_and_update_card(&conn, original_name, &unit)?
@@ -1338,7 +1690,7 @@ impl ToolsGui {
         }
 
         let action_point_cost =
-            Self::parse_i64_field("Action Point Cost", &self.action_point_cost)?;
+            shared::form_parsing::parse_i64_required("Action Point Cost", &self.action_point_cost)?;
         let action_type = match self.action_type.trim() {
             "Interaction" => app::cards::action::ActionType::Interaction,
             "Attack" => app::cards::action::ActionType::Attack,
@@ -1364,17 +1716,6 @@ impl ToolsGui {
         let _ = updated;
 
         Ok(())
-    }
-
-    fn parse_optional_i64_field(label: &str, s: &str) -> Result<Option<i64>> {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Ok(None);
-        }
-        let v: i64 = trimmed
-            .parse()
-            .with_context(|| format!("{label} must be an integer"))?;
-        Ok(Some(v))
     }
 
     fn save_unit_association(&self) -> Result<()> {
@@ -1528,9 +1869,9 @@ impl ToolsGui {
         let conn = self.open_conn()?;
         let action_name = self.current_action_name_for_subforms()?.to_string();
 
-        let damage = Self::parse_i64_field("Damage", &self.attack_damage)?;
-        let range = Self::parse_i64_field("Range", &self.attack_range)?;
-        let target = Self::parse_i64_field("Target", &self.attack_target)?;
+        let damage = shared::form_parsing::parse_i64_required("Damage", &self.attack_damage)?;
+        let range = shared::form_parsing::parse_i64_required("Range", &self.attack_range)?;
+        let target = shared::form_parsing::parse_i64_required("Target", &self.attack_target)?;
 
         let damage_type = match self.attack_damage_type.trim() {
             "Arcane" => app::cards::attack::DamageType::Arcane,
@@ -1577,8 +1918,8 @@ impl ToolsGui {
         let conn = self.open_conn()?;
         let action_name = self.current_action_name_for_subforms()?.to_string();
 
-        let range = Self::parse_i64_field("Range", &self.interaction_range)?;
-        let target = Self::parse_optional_i64_field("Target", &self.interaction_target)?;
+        let range = shared::form_parsing::parse_i64_required("Range", &self.interaction_range)?;
+        let target = shared::form_parsing::parse_i64_optional("Target", &self.interaction_target)?;
 
         let skill = match self.interaction_skill.trim() {
             "Strength" => app::cards::interaction::Skill::Strength,

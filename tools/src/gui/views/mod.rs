@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod armor_modifiers;
 pub mod items;
 pub mod levels;
 pub mod units;

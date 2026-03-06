@@ -3,6 +3,7 @@
 //! Each card type lives in its own module/file.
 
 pub mod action;
+pub mod armor_modifier;
 pub mod attack;
 pub mod interaction;
 pub mod item;
