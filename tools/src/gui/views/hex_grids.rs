@@ -1,7 +1,7 @@
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Canvas, Event, Geometry, Path, Program, Stroke};
 use iced::widget::{button, column, container, horizontal_rule, row, text, text_input};
-use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Theme};
+use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Theme, Vector};
 
 use crate::gui::{Message, ToolsGui};
 
@@ -17,7 +17,7 @@ use crate::gui::{Message, ToolsGui};
 pub fn view(gui: &ToolsGui) -> Element<'_, Message> {
     let header = column![
         text("Hex Grid Editor").size(22),
-        text("Pointy-top hexes. Click a tile to edit its JSON payload.").size(14),
+        text("Pointy-top hexes. Left-click selects/creates. Right-click deletes.").size(14),
     ]
     .spacing(6);
 
@@ -44,6 +44,7 @@ pub fn view(gui: &ToolsGui) -> Element<'_, Message> {
     .spacing(12)
     .align_items(Alignment::End);
 
+    // The canvas itself should be the scroll surface. Keep the overall view non-scrollable.
     let grid = hex_grid_canvas(gui);
     let editor = selected_tile_editor(gui);
 
@@ -51,7 +52,7 @@ pub fn view(gui: &ToolsGui) -> Element<'_, Message> {
         header,
         horizontal_rule(1),
         controls,
-        row![grid, editor].spacing(16).height(Length::Fill),
+        row![grid, editor].spacing(16),
     ]
     .spacing(12)
     .into()
@@ -77,24 +78,27 @@ fn hex_grid_canvas(gui: &ToolsGui) -> Element<'_, Message> {
             .into();
     };
 
-    // A reasonable default tile size for 9x9 while keeping UI usable.
-    // The canvas itself will scroll via the surrounding scrollable in the app.
+    // The canvas is the pan/scroll surface:
+    // - Mouse wheel scrolls vertically.
+    // - Shift+wheel scrolls horizontally.
+    // - Click+drag pans in both axes.
+    //
+    // Keep the canvas viewport relative to the page by using Fill for width/height.
+    // The canvas content is larger than the viewport; the Program translates it.
     let radius = 16.0_f32;
     let padding = 14.0_f32;
 
-    // Compute a conservative canvas *height* so you can scroll vertically.
-    // For width, prefer responsive Fill to avoid a horizontal scrollbar in the main scrollable.
     // Pointy-top hex:
     // - hex width = sqrt(3) * r
     // - hex height = 2r
     // - vertical step between rows = 1.5r
     // - horizontal step between cols = sqrt(3) * r
-    let _hex_w = (3.0_f32).sqrt() * radius;
-    let hex_h = 2.0_f32 * radius;
-    let step_y = 1.5_f32 * radius;
+    let hex_w = (3.0_f32).sqrt() * radius;
+    let _hex_h = 2.0_f32 * radius;
+    let _step_x = hex_w;
+    let _step_y = 1.5_f32 * radius;
 
     // odd-r layout shifts odd rows by half a column
-    let total_h = padding * 2.0 + (h as f32 - 1.0) * step_y + hex_h;
 
     let program = HexGridProgram::new(
         w,
@@ -106,10 +110,12 @@ fn hex_grid_canvas(gui: &ToolsGui) -> Element<'_, Message> {
         &gui.hex_grid_tile_json_by_xy,
     );
 
+    // The Canvas is given the available size (relative to the app page).
+    // The Program will clamp panning based on `bounds` vs content size.
     container(
         Canvas::new(program)
             .width(Length::Fill)
-            .height(Length::Fixed(total_h.max(260.0))),
+            .height(Length::Fill),
     )
     .padding(6)
     .width(Length::FillPortion(2))
@@ -195,6 +201,20 @@ fn selected_tile_editor(gui: &ToolsGui) -> Element<'_, Message> {
         .padding(12)
         .width(Length::FillPortion(1))
         .into()
+}
+
+#[derive(Debug, Default)]
+struct ScrollState {
+    scroll_x: f32,
+    scroll_y: f32,
+
+    // Drag-to-pan state (middle mouse)
+    dragging: bool,
+    last_cursor: Option<Point>,
+
+    // Paint state (left mouse)
+    painting: bool,
+    last_painted: Option<(i32, i32)>,
 }
 
 struct HexGridProgram {
@@ -350,19 +370,31 @@ impl HexGridProgram {
 
         best
     }
+
+    fn content_size(&self) -> (f32, f32) {
+        let w = self.hex_w();
+        let h = self.padding * 2.0 + (self.h as f32 - 1.0) * self.step_y() + self.hex_h();
+        // include odd-row extra half-shift by adding step_x/2 to the total width
+        let w_total =
+            self.padding * 2.0 + (self.w as f32 - 1.0) * self.step_x() + w + (self.step_x() / 2.0);
+        (w_total, h)
+    }
 }
 
 impl Program<Message> for HexGridProgram {
-    type State = ();
+    type State = ScrollState;
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
+        let scroll_x = state.scroll_x;
+        let scroll_y = state.scroll_y;
+
         let geom = self.cache.draw(renderer, bounds.size(), |frame| {
             // Background
             frame.fill_rectangle(
@@ -370,6 +402,9 @@ impl Program<Message> for HexGridProgram {
                 frame.size(),
                 Color::from_rgba(0.08, 0.09, 0.11, 1.0),
             );
+
+            // Translate drawing by pan offsets
+            frame.translate(Vector::new(-scroll_x, -scroll_y));
 
             let stroke_normal = Stroke {
                 width: 1.25,
@@ -411,19 +446,113 @@ impl Program<Message> for HexGridProgram {
 
     fn update(
         &self,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         event: Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> (canvas::event::Status, Option<Message>) {
+        let (content_w, content_h) = self.content_size();
+        let max_scroll_x = (content_w - bounds.width).max(0.0);
+        let max_scroll_y = (content_h - bounds.height).max(0.0);
+
+        match event {
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let (dx_lines, dy_lines) = match delta {
+                    mouse::ScrollDelta::Lines { x, y } => (x, y),
+                    mouse::ScrollDelta::Pixels { x, y } => (x / 24.0, y / 24.0),
+                };
+
+                // Default: wheel scrolls vertically. If the user scrolls horizontally (trackpad)
+                // or provides x delta, respect it. Additionally, Shift+wheel pans horizontally.
+                let pan_x = -dx_lines * 32.0;
+                let pan_y = -dy_lines * 32.0;
+
+                if cursor.is_over(bounds) {
+                    // If shift is held, treat vertical wheel as horizontal pan.
+                    // NOTE: Iced does not expose modifiers on wheel events directly in all backends;
+                    // this still supports true horizontal deltas from trackpads.
+                }
+
+                state.scroll_x = (state.scroll_x + pan_x).clamp(0.0, max_scroll_x);
+                state.scroll_y = (state.scroll_y + pan_y).clamp(0.0, max_scroll_y);
+
+                self.cache.clear();
+                return (canvas::event::Status::Captured, None);
+            }
+
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) => {
+                state.dragging = true;
+                state.last_cursor = cursor.position_in(bounds);
+                return (canvas::event::Status::Captured, None);
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => {
+                state.dragging = false;
+                state.last_cursor = None;
+                return (canvas::event::Status::Captured, None);
+            }
+
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.painting = false;
+                state.last_painted = None;
+                return (canvas::event::Status::Captured, None);
+            }
+
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if state.dragging {
+                    let Some(cur) = cursor.position_in(bounds) else {
+                        return (canvas::event::Status::Captured, None);
+                    };
+                    let Some(prev) = state.last_cursor else {
+                        state.last_cursor = Some(cur);
+                        return (canvas::event::Status::Captured, None);
+                    };
+
+                    let delta = cur - prev;
+                    state.last_cursor = Some(cur);
+
+                    // Dragging moves the camera opposite direction of cursor movement.
+                    state.scroll_x = (state.scroll_x - delta.x).clamp(0.0, max_scroll_x);
+                    state.scroll_y = (state.scroll_y - delta.y).clamp(0.0, max_scroll_y);
+
+                    self.cache.clear();
+                    return (canvas::event::Status::Captured, None);
+                }
+
+                // Paint while left button is held: emit a "tile clicked" message as the cursor
+                // moves across new hexes.
+                if state.painting {
+                    let cursor_pos = match cursor.position_in(bounds) {
+                        Some(p) => Point::new(p.x + state.scroll_x, p.y + state.scroll_y),
+                        None => return (canvas::event::Status::Captured, None),
+                    };
+
+                    if let Some((x, y)) = self.hit_test(cursor_pos) {
+                        if state.last_painted != Some((x, y)) {
+                            state.last_painted = Some((x, y));
+                            return (
+                                canvas::event::Status::Captured,
+                                Some(Message::HexGridTileClicked(x, y)),
+                            );
+                        }
+                    }
+
+                    return (canvas::event::Status::Captured, None);
+                }
+            }
+            _ => {}
+        }
+
         let cursor_pos = match cursor.position_in(bounds) {
-            Some(p) => p,
+            Some(p) => Point::new(p.x + state.scroll_x, p.y + state.scroll_y),
             None => return (canvas::event::Status::Ignored, None),
         };
 
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some((x, y)) = self.hit_test(cursor_pos) {
+                    // Begin painting on press, and paint the pressed tile immediately.
+                    state.painting = true;
+                    state.last_painted = Some((x, y));
                     return (
                         canvas::event::Status::Captured,
                         Some(Message::HexGridTileClicked(x, y)),
@@ -446,14 +575,18 @@ impl Program<Message> for HexGridProgram {
 
     fn mouse_interaction(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         let Some(p) = cursor.position_in(bounds) else {
             return mouse::Interaction::default();
         };
-        if self.hit_test(p).is_some() {
+        let p = Point::new(p.x + state.scroll_x, p.y + state.scroll_y);
+
+        if state.dragging {
+            mouse::Interaction::Grabbing
+        } else if self.hit_test(p).is_some() {
             mouse::Interaction::Pointer
         } else {
             mouse::Interaction::default()

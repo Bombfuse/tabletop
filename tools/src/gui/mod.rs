@@ -1122,7 +1122,15 @@ impl Application for ToolsGui {
                 horizontal_rule(1),
                 status,
                 horizontal_rule(1),
-                iced::widget::scrollable(content).height(Length::Fill),
+                // The Hex Grids view manages its own scrolling; wrapping it in an outer scrollable
+                // causes "infinite" scroll behavior due to Fill-sized canvas/layout interactions.
+                if self.tab == Tab::HexGrids {
+                    content
+                } else {
+                    iced::widget::scrollable(content)
+                        .height(Length::Fill)
+                        .into()
+                },
             ]
             .spacing(12),
         )
