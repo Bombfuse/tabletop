@@ -35,6 +35,13 @@ impl Tab {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveView {
+    List,
+    EditUnit { original_name: String },
+    EditItem { original_name: String },
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
@@ -54,6 +61,15 @@ pub enum Message {
     // Items form
     ItemNameChanged(String),
     CreateItem,
+
+    // Edit navigation
+    EditUnit(String),
+    EditItem(String),
+    CancelEdit,
+
+    // Save edits
+    SaveUnitEdits,
+    SaveItemEdits,
 
     // Delete actions
     DeleteUnit(String),
@@ -85,7 +101,7 @@ pub struct ToolsGui {
     pub db_path: PathBuf,
     pub migrations_dir: PathBuf,
 
-    // Units form
+    // Units form / edit buffer
     pub unit_name: String,
     pub unit_strength: String,
     pub unit_focus: String,
@@ -93,7 +109,7 @@ pub struct ToolsGui {
     pub unit_agility: String,
     pub unit_knowledge: String,
 
-    // Items form
+    // Items form / edit buffer
     pub item_name: String,
 
     // loaded data
@@ -102,6 +118,7 @@ pub struct ToolsGui {
 
     // ui state
     pub status: Option<String>,
+    pub active_view: ActiveView,
 }
 
 impl Default for ToolsGui {
@@ -127,6 +144,7 @@ impl Default for ToolsGui {
             items: vec![],
 
             status: None,
+            active_view: ActiveView::List,
         }
     }
 }
@@ -166,6 +184,7 @@ impl Application for ToolsGui {
 
             Message::SwitchTab(tab) => {
                 self.tab = tab;
+                self.active_view = ActiveView::List;
                 Command::none()
             }
 
@@ -224,6 +243,47 @@ impl Application for ToolsGui {
                 Command::perform(async {}, |_| Message::Refresh)
             }
 
+            Message::EditUnit(name) => {
+                if let Err(e) = self.begin_edit_unit(&name) {
+                    self.status = Some(format!("{e:#}"));
+                }
+                Command::none()
+            }
+
+            Message::EditItem(name) => {
+                if let Err(e) = self.begin_edit_item(&name) {
+                    self.status = Some(format!("{e:#}"));
+                }
+                Command::none()
+            }
+
+            Message::CancelEdit => {
+                self.active_view = ActiveView::List;
+                Command::none()
+            }
+
+            Message::SaveUnitEdits => {
+                if let Err(e) = self.save_unit_edits() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Unit updated".to_string());
+                    self.active_view = ActiveView::List;
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+
+            Message::SaveItemEdits => {
+                if let Err(e) = self.save_item_edits() {
+                    self.status = Some(format!("{e:#}"));
+                    Command::none()
+                } else {
+                    self.status = Some("Item updated".to_string());
+                    self.active_view = ActiveView::List;
+                    Command::perform(async {}, |_| Message::Refresh)
+                }
+            }
+
             Message::DeleteUnit(name) => {
                 if let Err(e) = self.delete_unit(&name) {
                     self.status = Some(format!("{e:#}"));
@@ -267,8 +327,20 @@ impl Application for ToolsGui {
         let status = views::status_bar(self.status.as_deref());
 
         let content = match self.tab {
-            Tab::Units => views::units::view(self),
-            Tab::Items => views::items::view(self),
+            Tab::Units => match &self.active_view {
+                ActiveView::List => views::units::view(self),
+                ActiveView::EditUnit { original_name } => {
+                    views::units::edit_view(self, original_name)
+                }
+                _ => views::units::view(self),
+            },
+            Tab::Items => match &self.active_view {
+                ActiveView::List => views::items::view(self),
+                ActiveView::EditItem { original_name } => {
+                    views::items::edit_view(self, original_name)
+                }
+                _ => views::items::view(self),
+            },
         };
 
         container(
@@ -384,6 +456,86 @@ impl ToolsGui {
     fn delete_item(&self, name: &str) -> Result<()> {
         let conn = self.open_conn()?;
         let _ = app::cards::item::delete_card(&conn, name)?;
+        Ok(())
+    }
+
+    fn begin_edit_unit(&mut self, name: &str) -> Result<()> {
+        let conn = self.open_conn()?;
+        let u = app::cards::unit::get_card(&conn, name)?
+            .with_context(|| format!("Unit `{name}` not found"))?;
+
+        self.unit_name = u.name.clone();
+        self.unit_strength = u.strength.to_string();
+        self.unit_focus = u.focus.to_string();
+        self.unit_intelligence = u.intelligence.to_string();
+        self.unit_agility = u.agility.to_string();
+        self.unit_knowledge = u.knowledge.to_string();
+
+        self.active_view = ActiveView::EditUnit {
+            original_name: u.name,
+        };
+        Ok(())
+    }
+
+    fn begin_edit_item(&mut self, name: &str) -> Result<()> {
+        let conn = self.open_conn()?;
+        let it = app::cards::item::get_card(&conn, name)?
+            .with_context(|| format!("Item `{name}` not found"))?;
+
+        self.item_name = it.name.clone();
+
+        self.active_view = ActiveView::EditItem {
+            original_name: it.name,
+        };
+        Ok(())
+    }
+
+    fn save_unit_edits(&self) -> Result<()> {
+        let ActiveView::EditUnit { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing a unit");
+        };
+
+        let conn = self.open_conn()?;
+
+        let new_name = self.unit_name.trim().to_string();
+        if new_name.is_empty() {
+            anyhow::bail!("Unit.name must be non-empty");
+        }
+
+        let unit = app::cards::unit::Unit {
+            name: new_name,
+            strength: Self::parse_i64_field("Strength", &self.unit_strength)?,
+            focus: Self::parse_i64_field("Focus", &self.unit_focus)?,
+            intelligence: Self::parse_i64_field("Intelligence", &self.unit_intelligence)?,
+            agility: Self::parse_i64_field("Agility", &self.unit_agility)?,
+            knowledge: Self::parse_i64_field("Knowledge", &self.unit_knowledge)?,
+        };
+
+        let updated = app::cards::unit::rename_and_update_card(&conn, original_name, &unit)?
+            .with_context(|| format!("Unit `{}` does not exist", original_name))?;
+        let _ = updated;
+
+        Ok(())
+    }
+
+    fn save_item_edits(&self) -> Result<()> {
+        let ActiveView::EditItem { original_name } = &self.active_view else {
+            anyhow::bail!("Not currently editing an item");
+        };
+
+        let conn = self.open_conn()?;
+
+        let new_name = self.item_name.trim().to_string();
+        if new_name.is_empty() {
+            anyhow::bail!("Item.name must be non-empty");
+        }
+
+        let item = app::cards::item::Item { name: new_name };
+
+        let updated = app::cards::item::rename_card(&conn, original_name, &item)?
+            .with_context(|| format!("Item `{}` does not exist", original_name))?;
+        let _ = updated;
+
         Ok(())
     }
 }

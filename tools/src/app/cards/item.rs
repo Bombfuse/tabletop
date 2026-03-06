@@ -28,9 +28,6 @@ pub fn save_card(conn: &Connection, card: &Item) -> Result<Item> {
 
 /// Updates an existing item (by name).
 ///
-/// For the current model, the only field is `name`, so "update" is treated as
-/// "touch" semantics (ensure it exists) without changing the name.
-///
 /// Returns `Ok(None)` if no item with that name exists.
 pub fn update_card(conn: &Connection, card: &Item) -> Result<Option<Item>> {
     validate_card(card)?;
@@ -45,6 +42,42 @@ pub fn update_card(conn: &Connection, card: &Item) -> Result<Option<Item>> {
             params![card.name],
         )
         .with_context(|| format!("Failed to update item `{}`", card.name))?;
+
+    if changed == 0 {
+        return Ok(None);
+    }
+
+    get_card(conn, &card.name)
+}
+
+/// Renames an item (updates the primary key `name`).
+///
+/// - `old_name` identifies the existing row.
+/// - `card.name` is the new name.
+/// - If `old_name == card.name`, this behaves like `update_card`.
+///
+/// Returns `Ok(None)` if no item with `old_name` exists.
+pub fn rename_card(conn: &Connection, old_name: &str, card: &Item) -> Result<Option<Item>> {
+    let old_name = old_name.trim();
+    if old_name.is_empty() {
+        anyhow::bail!("old_name must be non-empty");
+    }
+    validate_card(card)?;
+
+    if old_name == card.name.trim() {
+        return update_card(conn, card);
+    }
+
+    let changed = conn
+        .execute(
+            r#"
+            UPDATE items
+            SET name = ?2
+            WHERE name = ?1
+            "#,
+            params![old_name, card.name],
+        )
+        .with_context(|| format!("Failed to rename item `{}` to `{}`", old_name, card.name))?;
 
     if changed == 0 {
         return Ok(None);
@@ -148,6 +181,34 @@ mod tests {
             .expect("get_card should succeed")
             .expect("card should exist");
         assert_eq!(reloaded, it);
+    }
+
+    #[test]
+    fn rename_card_renames_primary_key() {
+        let conn = crate::app::cards::test_support::open_in_memory_db();
+        crate::app::cards::test_support::create_schema(&conn);
+
+        let it1 = Item {
+            name: "Potion".to_string(),
+        };
+        save_card(&conn, &it1).expect("save item");
+
+        let it2 = Item {
+            name: "Elixir".to_string(),
+        };
+
+        let renamed = rename_card(&conn, "Potion", &it2)
+            .expect("rename_card should succeed")
+            .expect("row should exist to rename");
+        assert_eq!(renamed, it2);
+
+        let old = get_card(&conn, "Potion").expect("get old after rename");
+        assert!(old.is_none());
+
+        let new = get_card(&conn, "Elixir")
+            .expect("get new after rename")
+            .expect("renamed card should exist");
+        assert_eq!(new, it2);
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         let row_el = row![
             text(it.name.clone()).size(16),
             iced::widget::Space::with_width(Length::Fill),
+            button("Edit").on_press(Message::EditItem(it.name.clone())),
             button("Delete").on_press(Message::DeleteItem(it.name.clone())),
         ]
         .spacing(12);
@@ -38,6 +39,30 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
     let list = scrollable(list_col).height(Length::Fill);
 
     column![form, horizontal_rule(1), list]
+        .spacing(12)
+        .height(Length::Fill)
+        .into()
+}
+
+pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, Message> {
+    let header = row![
+        text(format!("Edit Item: {original_name}")).size(18),
+        iced::widget::Space::with_width(Length::Fill),
+        button("Cancel").on_press(Message::CancelEdit),
+        button("Save").on_press(Message::SaveItemEdits),
+    ]
+    .spacing(12);
+
+    let form = column![
+        row![
+            labeled_input("Name", &app.item_name, Message::ItemNameChanged),
+            iced::widget::Space::with_width(Length::Fill),
+        ]
+        .spacing(12),
+    ]
+    .spacing(10);
+
+    column![header, horizontal_rule(1), form]
         .spacing(12)
         .height(Length::Fill)
         .into()

@@ -24,7 +24,11 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         .spacing(12),
         row![
             labeled_input("Agility", &app.unit_agility, Message::UnitAgilityChanged),
-            labeled_input("Knowledge", &app.unit_knowledge, Message::UnitKnowledgeChanged),
+            labeled_input(
+                "Knowledge",
+                &app.unit_knowledge,
+                Message::UnitKnowledgeChanged
+            ),
             iced::widget::Space::with_width(Length::Fill),
         ]
         .spacing(12),
@@ -49,6 +53,7 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         let row_el = row![
             column![text(u.name.clone()).size(16), text(stats).size(12)].spacing(2),
             iced::widget::Space::with_width(Length::Fill),
+            button("Edit").on_press(Message::EditUnit(u.name.clone())),
             button("Delete").on_press(Message::DeleteUnit(u.name.clone())),
         ]
         .spacing(12);
@@ -59,6 +64,50 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
     let list = scrollable(list_col).height(Length::Fill);
 
     column![form, horizontal_rule(1), list]
+        .spacing(12)
+        .height(Length::Fill)
+        .into()
+}
+
+pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, Message> {
+    let header = row![
+        text(format!("Edit Unit: {original_name}")).size(18),
+        iced::widget::Space::with_width(Length::Fill),
+        button("Cancel").on_press(Message::CancelEdit),
+        button("Save").on_press(Message::SaveUnitEdits),
+    ]
+    .spacing(12);
+
+    let form = column![
+        row![
+            labeled_input("Name", &app.unit_name, Message::UnitNameChanged),
+            iced::widget::Space::with_width(Length::Fill),
+        ]
+        .spacing(12),
+        row![
+            labeled_input("Strength", &app.unit_strength, Message::UnitStrengthChanged),
+            labeled_input("Focus", &app.unit_focus, Message::UnitFocusChanged),
+            labeled_input(
+                "Intelligence",
+                &app.unit_intelligence,
+                Message::UnitIntelligenceChanged
+            ),
+        ]
+        .spacing(12),
+        row![
+            labeled_input("Agility", &app.unit_agility, Message::UnitAgilityChanged),
+            labeled_input(
+                "Knowledge",
+                &app.unit_knowledge,
+                Message::UnitKnowledgeChanged
+            ),
+            iced::widget::Space::with_width(Length::Fill),
+        ]
+        .spacing(12),
+    ]
+    .spacing(10);
+
+    column![header, horizontal_rule(1), form]
         .spacing(12)
         .height(Length::Fill)
         .into()

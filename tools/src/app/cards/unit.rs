@@ -40,6 +40,8 @@ pub fn save_card(conn: &Connection, card: &Unit) -> Result<Unit> {
 
 /// Updates an existing unit (by name).
 ///
+/// This updates stats for an existing unit with the same `name`.
+///
 /// Returns `Ok(None)` if no unit with that name exists.
 pub fn update_card(conn: &Connection, card: &Unit) -> Result<Option<Unit>> {
     validate_card(card)?;
@@ -66,6 +68,60 @@ pub fn update_card(conn: &Connection, card: &Unit) -> Result<Option<Unit>> {
             ],
         )
         .with_context(|| format!("Failed to update unit `{}`", card.name))?;
+
+    if changed == 0 {
+        return Ok(None);
+    }
+
+    get_card(conn, &card.name)
+}
+
+/// Renames a unit (updates the primary key `name`) and updates all fields.
+///
+/// - `old_name` identifies the existing row.
+/// - `card.name` is the new name.
+/// - If `old_name == card.name`, this behaves like `update_card`.
+///
+/// Returns `Ok(None)` if no unit with `old_name` exists.
+pub fn rename_and_update_card(
+    conn: &Connection,
+    old_name: &str,
+    card: &Unit,
+) -> Result<Option<Unit>> {
+    let old_name = old_name.trim();
+    if old_name.is_empty() {
+        anyhow::bail!("old_name must be non-empty");
+    }
+    validate_card(card)?;
+
+    if old_name == card.name.trim() {
+        return update_card(conn, card);
+    }
+
+    let changed = conn
+        .execute(
+            r#"
+            UPDATE units
+            SET
+                name = ?2,
+                strength = ?3,
+                focus = ?4,
+                intelligence = ?5,
+                agility = ?6,
+                knowledge = ?7
+            WHERE name = ?1
+            "#,
+            params![
+                old_name,
+                card.name,
+                card.strength,
+                card.focus,
+                card.intelligence,
+                card.agility,
+                card.knowledge
+            ],
+        )
+        .with_context(|| format!("Failed to rename unit `{}` to `{}`", old_name, card.name))?;
 
     if changed == 0 {
         return Ok(None);
@@ -193,6 +249,44 @@ mod tests {
             .expect("get_card should succeed")
             .expect("card should still exist");
         assert_eq!(reloaded, u2);
+    }
+
+    #[test]
+    fn rename_and_update_card_renames_primary_key_and_updates_fields() {
+        let conn = crate::app::cards::test_support::open_in_memory_db();
+        crate::app::cards::test_support::create_schema(&conn);
+
+        let u1 = Unit {
+            name: "Alice".to_string(),
+            strength: 3,
+            focus: 2,
+            intelligence: 4,
+            agility: 5,
+            knowledge: 1,
+        };
+        save_card(&conn, &u1).expect("save initial unit");
+
+        let u2 = Unit {
+            name: "Alicia".to_string(),
+            strength: 10,
+            focus: 11,
+            intelligence: 12,
+            agility: 13,
+            knowledge: 14,
+        };
+
+        let renamed = rename_and_update_card(&conn, "Alice", &u2)
+            .expect("rename_and_update_card should succeed")
+            .expect("row should exist to rename");
+        assert_eq!(renamed, u2);
+
+        let old = get_card(&conn, "Alice").expect("get old after rename");
+        assert!(old.is_none());
+
+        let new = get_card(&conn, "Alicia")
+            .expect("get new after rename")
+            .expect("renamed card should exist");
+        assert_eq!(new, u2);
     }
 
     #[test]
