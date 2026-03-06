@@ -80,7 +80,7 @@ pub enum Message {
     ActionTextChanged(String),
     CreateAction,
 
-    // Attack subform (for action edit view)
+    // Attack subform (used for create + edit when ActionType = Attack)
     AttackDamageChanged(String),
     AttackDamageTypeChanged(String),
     AttackSkillChanged(String),
@@ -89,7 +89,7 @@ pub enum Message {
     SaveAttackEdits,
     DeleteAttack,
 
-    // Interaction subform (for action edit view)
+    // Interaction subform (used for create + edit when ActionType = Interaction)
     InteractionRangeChanged(String),
     InteractionSkillChanged(String),
     InteractionTargetChanged(String), // empty string => NULL
@@ -388,7 +388,7 @@ impl Application for ToolsGui {
                 Command::none()
             }
             Message::CreateAction => {
-                if let Err(e) = self.create_action_from_form() {
+                if let Err(e) = self.create_action_with_subtype_from_form() {
                     self.status = Some(format!("{e:#}"));
                 } else {
                     self.status = Some("Action created".to_string());
@@ -772,8 +772,9 @@ impl ToolsGui {
         Ok(())
     }
 
-    fn create_action_from_form(&self) -> Result<()> {
+    fn create_action_with_subtype_from_form(&self) -> Result<()> {
         let conn = self.open_conn()?;
+
         let action_point_cost =
             Self::parse_i64_field("Action Point Cost", &self.action_point_cost)?;
         let action_type = match self.action_type.trim() {
@@ -784,14 +785,83 @@ impl ToolsGui {
             }
         };
 
+        let action_name = self.action_name.trim().to_string();
+        let text = self.action_text.trim().to_string();
+
         let action = app::cards::action::Action {
-            name: self.action_name.trim().to_string(),
+            name: action_name.clone(),
             action_point_cost,
             action_type,
-            text: self.action_text.trim().to_string(),
+            text,
         };
 
+        // Treat Action + subtype as one entity during creation.
+        // 1) Create the Action row.
         app::cards::action::save_card(&conn, &action)?;
+
+        // 2) Create exactly one subtype row, based on Action.action_type.
+        match action.action_type {
+            app::cards::action::ActionType::Attack => {
+                let damage = Self::parse_i64_field("Damage", &self.attack_damage)?;
+                let range = Self::parse_i64_field("Range", &self.attack_range)?;
+                let target = Self::parse_i64_field("Target", &self.attack_target)?;
+
+                let damage_type = match self.attack_damage_type.trim() {
+                    "Arcane" => app::cards::attack::DamageType::Arcane,
+                    "Physical" => app::cards::attack::DamageType::Physical,
+                    other => {
+                        anyhow::bail!("Damage Type must be `Arcane` or `Physical` (got `{other}`)")
+                    }
+                };
+
+                let skill = match self.attack_skill.trim() {
+                    "Strength" => app::cards::attack::Skill::Strength,
+                    "Focus" => app::cards::attack::Skill::Focus,
+                    "Intelligence" => app::cards::attack::Skill::Intelligence,
+                    "Knowledge" => app::cards::attack::Skill::Knowledge,
+                    "Agility" => app::cards::attack::Skill::Agility,
+                    other => anyhow::bail!(
+                        "Skill must be Strength/Focus/Intelligence/Knowledge/Agility (got `{other}`)"
+                    ),
+                };
+
+                let atk = app::cards::attack::Attack {
+                    action_name,
+                    damage,
+                    damage_type,
+                    skill,
+                    target,
+                    range,
+                };
+
+                let _ = app::cards::attack::save_card(&conn, &atk)?;
+            }
+            app::cards::action::ActionType::Interaction => {
+                let range = Self::parse_i64_field("Range", &self.interaction_range)?;
+                let target = Self::parse_optional_i64_field("Target", &self.interaction_target)?;
+
+                let skill = match self.interaction_skill.trim() {
+                    "Strength" => app::cards::interaction::Skill::Strength,
+                    "Focus" => app::cards::interaction::Skill::Focus,
+                    "Intelligence" => app::cards::interaction::Skill::Intelligence,
+                    "Knowledge" => app::cards::interaction::Skill::Knowledge,
+                    "Agility" => app::cards::interaction::Skill::Agility,
+                    other => anyhow::bail!(
+                        "Skill must be Strength/Focus/Intelligence/Knowledge/Agility (got `{other}`)"
+                    ),
+                };
+
+                let ix = app::cards::interaction::Interaction {
+                    action_name,
+                    range,
+                    skill,
+                    target,
+                };
+
+                let _ = app::cards::interaction::save_card(&conn, &ix)?;
+            }
+        }
+
         Ok(())
     }
 

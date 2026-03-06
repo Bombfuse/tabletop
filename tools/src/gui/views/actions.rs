@@ -208,12 +208,6 @@ fn create_form_view(app_state: &ToolsGui) -> Element<'_, Message> {
             ]
             .spacing(12)
             .align_items(Alignment::Center),
-            row![
-                button("Save Attack").on_press(Message::SaveAttackEdits),
-                button("Delete Attack").on_press(Message::DeleteAttack),
-                iced::widget::Space::with_width(Length::Fill),
-            ]
-            .spacing(8),
         ]
         .spacing(10),
     )
@@ -252,12 +246,6 @@ fn create_form_view(app_state: &ToolsGui) -> Element<'_, Message> {
             ]
             .spacing(12)
             .align_items(Alignment::Center),
-            row![
-                button("Save Interaction").on_press(Message::SaveInteractionEdits),
-                button("Delete Interaction").on_press(Message::DeleteInteraction),
-                iced::widget::Space::with_width(Length::Fill),
-            ]
-            .spacing(8),
         ]
         .spacing(10),
     )
@@ -319,10 +307,7 @@ fn create_form_view(app_state: &ToolsGui) -> Element<'_, Message> {
     let mut out = column![container(form).width(Length::Fill)].spacing(10);
 
     if let Some(sub) = subtype_section {
-        out = out
-            .push(iced::widget::horizontal_rule(1))
-            .push(text("Subtype (create after saving the Action)").size(16))
-            .push(sub);
+        out = out.push(iced::widget::horizontal_rule(1)).push(sub);
     }
 
     container(out).width(Length::Fill).into()
