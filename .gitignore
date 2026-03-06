@@ -1,3 +1,4 @@
 target
 *-shm
 *-wal
+simulator.sqlite3

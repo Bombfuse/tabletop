@@ -10,6 +10,9 @@ iced = { version = "0.12", features = ["wgpu", "tokio"] }
 # Data access (SQLite + card APIs)
 data = { path = "../data" }
 
+# Simulator DB persistence (separate from the core tabletop DB)
+rusqlite.workspace = true
+
 # Common workspace deps (optional but handy)
 anyhow.workspace = true
 

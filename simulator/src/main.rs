@@ -4,6 +4,9 @@ use iced::{Application, Element, Length, Settings, Theme};
 
 use data::cards::unit;
 
+const CORE_DB_PATH: &str = "tabletop.sqlite3";
+const SIMULATOR_DB_PATH: &str = "simulator.sqlite3";
+
 fn main() -> iced::Result {
     Simulator::run(Settings {
         window: iced::window::Settings {
@@ -27,6 +30,7 @@ enum Message {
     BackToMenu,
 
     SelectHero(String),
+    BeginCampaign,
 }
 
 struct Simulator {
@@ -35,6 +39,8 @@ struct Simulator {
     units: Vec<unit::Unit>,
     selected_hero: Option<String>,
     load_error: Option<String>,
+
+    campaign_saved: Option<String>,
 }
 
 impl Simulator {
@@ -92,6 +98,11 @@ impl Simulator {
                 .horizontal_alignment(Horizontal::Center),
         };
 
+        let saved = match self.campaign_saved.as_deref() {
+            Some(msg) => text(msg).size(16).horizontal_alignment(Horizontal::Center),
+            None => text("").size(1),
+        };
+
         let error = match self.load_error.as_deref() {
             Some(e) => text(format!("DB error: {e}"))
                 .size(16)
@@ -139,12 +150,20 @@ impl Simulator {
 
         let list = scrollable(container(list).width(Length::Fill)).height(Length::FillPortion(1));
 
+        let begin_enabled = self.selected_hero.is_some();
+        let mut begin = button(text("Begin Campaign").size(18))
+            .padding(12)
+            .width(Length::Fixed(200.0));
+        if begin_enabled {
+            begin = begin.on_press(Message::BeginCampaign);
+        }
+
         let back = button(text("Back to Menu").size(18))
             .padding(12)
             .width(Length::Fixed(200.0))
             .on_press(Message::BackToMenu);
 
-        let content = column![heading, sub, selected, error, list, back]
+        let content = column![heading, sub, selected, saved, error, list, begin, back]
             .spacing(14)
             .align_items(iced::Alignment::Center)
             .width(Length::Fill)
@@ -173,6 +192,7 @@ impl iced::Application for Simulator {
                 units: Vec::new(),
                 selected_hero: None,
                 load_error: None,
+                campaign_saved: None,
             },
             iced::Command::none(),
         )
@@ -188,11 +208,14 @@ impl iced::Application for Simulator {
                 self.screen = Screen::CampaignSelectHero;
 
                 self.load_error = None;
+                self.campaign_saved = None;
                 self.units.clear();
 
                 // NOTE: iced `Application::update` is sync, so we load synchronously here.
                 // If this becomes slow, move DB calls to a subscription/task.
-                let db_path = std::path::Path::new("tabletop.sqlite3");
+                //
+                // Core tabletop DB is used ONLY for reading reference/unit data.
+                let db_path = std::path::Path::new(CORE_DB_PATH);
                 match data::db::open_db(db_path).and_then(|conn| unit::list_cards(&conn)) {
                     Ok(units) => self.units = units,
                     Err(e) => self.load_error = Some(e.to_string()),
@@ -202,6 +225,55 @@ impl iced::Application for Simulator {
             }
             Message::SelectHero(name) => {
                 self.selected_hero = Some(name);
+                self.campaign_saved = None;
+                iced::Command::none()
+            }
+            Message::BeginCampaign => {
+                self.load_error = None;
+                self.campaign_saved = None;
+
+                let Some(hero_name) = self.selected_hero.clone() else {
+                    return iced::Command::none();
+                };
+
+                // Simulator DB is separate from the core tabletop DB and is used for campaign persistence.
+                // We keep it simple and create the schema on demand.
+                match rusqlite::Connection::open(SIMULATOR_DB_PATH)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|conn| {
+                        conn.pragma_update(None, "foreign_keys", "ON")?;
+                        conn.pragma_update(None, "journal_mode", "WAL")?;
+
+                        conn.execute_batch(
+                            r#"
+                            CREATE TABLE IF NOT EXISTS campaigns (
+                                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                                hero_unit_name     TEXT NOT NULL,
+                                created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                            );
+                            CREATE INDEX IF NOT EXISTS idx_campaigns_created_at ON campaigns(created_at);
+                            "#,
+                        )?;
+
+                        conn.execute(
+                            r#"
+                            INSERT INTO campaigns (hero_unit_name)
+                            VALUES (?1)
+                            "#,
+                            rusqlite::params![hero_name],
+                        )?;
+
+                        Ok(())
+                    }) {
+                    Ok(()) => {
+                        self.campaign_saved =
+                            Some("Campaign created and saved to simulator database.".to_string());
+                    }
+                    Err(e) => {
+                        self.load_error = Some(e.to_string());
+                    }
+                }
+
                 iced::Command::none()
             }
             Message::BackToMenu => {
