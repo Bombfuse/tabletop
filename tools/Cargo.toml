@@ -13,6 +13,7 @@ gui = ["dep:iced", "dep:tokio"]
 cli = ["dep:clap"]
 
 [dependencies]
+data = { path = "../data", features = ["bundled-sqlite"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 anyhow = "1"
 

@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+  "data",
+  "tools",
+]
+
+# Optional but useful defaults for workspace members.
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+rusqlite = { version = "0.31" }

@@ -1,0 +1,20 @@
+[package]
+name = "data"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enable this if you want rusqlite to ship with a bundled SQLite build (matches the existing tools crate behavior).
+bundled-sqlite = ["rusqlite/bundled"]
+
+[dependencies]
+anyhow = "1"
+rusqlite = { version = "0.31" }
+
+[dev-dependencies]
+# Keep tests simple/consistent with the rest of the repo.
+rusqlite = { version = "0.31", features = ["bundled"] }
