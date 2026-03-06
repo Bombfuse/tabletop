@@ -61,9 +61,11 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         list_col = list_col.push(container(row_el).padding(8));
     }
 
+    // Let the parent/root scroll view measure this content naturally.
+    // If we force `Length::Fill` here, it can behave like "infinite height"
+    // and fight the root scroll container.
     column![form, horizontal_rule(1), list_col]
         .spacing(12)
-        .height(Length::Fill)
         .into()
 }
 
@@ -105,10 +107,8 @@ pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, M
     ]
     .spacing(10);
 
-    column![header, horizontal_rule(1), form]
-        .spacing(12)
-        .height(Length::Fill)
-        .into()
+    // Let the parent/root scroll view measure this content naturally.
+    column![header, horizontal_rule(1), form].spacing(12).into()
 }
 
 pub fn list_units(conn: &rusqlite::Connection) -> Result<Vec<UnitRow>> {
