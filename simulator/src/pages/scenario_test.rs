@@ -189,8 +189,10 @@ impl HexGridCanvas {
         )
     }
 
-    /// Hit-test: find the nearest hex center within a radius threshold.
-    /// This is a pragmatic approach that is good enough for click selection.
+    /// Hit-test: find the nearest hex center (in *screen space*) within a radius threshold.
+    ///
+    /// We intentionally do hit-testing in screen space using the exact same geometry/origin math
+    /// as `draw()`, so it stays correct under pan + zoom.
     fn hit_test_hex(
         &self,
         base_r: f32,
@@ -198,32 +200,32 @@ impl HexGridCanvas {
         bounds: iced::Rectangle,
         cursor_screen: iced::Point,
     ) -> Option<SelectedHex> {
-        let world = Self::screen_to_world(viewport, cursor_screen);
-
-        // Same layout math as draw() but in world coordinates.
-        let r = base_r;
+        // Match `draw()` exactly:
+        // - base radius that fits grid
+        // - scaled by viewport zoom
+        // - origin is centered using the scaled grid pixel size
+        // - then pan is applied in screen space
+        let r = (base_r * viewport.zoom).max(2.0);
         let w = (3.0_f32).sqrt() * r;
         let v_step = 1.5 * r;
 
         let grid_size = compute_grid_pixel_size(&self.grid, r);
-        let origin = iced::Point::new(
+        let origin_world = iced::Point::new(
             (bounds.width - grid_size.width) / 2.0,
             (bounds.height - grid_size.height) / 2.0,
         );
+        let origin = iced::Point::new(
+            origin_world.x + viewport.pan.x,
+            origin_world.y + viewport.pan.y,
+        );
 
-        // Expand search by checking the "estimated" row/col first, then neighbors.
-        //
-        // IMPORTANT: these computations can yield very large magnitudes when the cursor is far
-        // outside the grid (or when zoom/pan create large world coordinates). Casting a large
-        // float to `i32` and then doing `approx_* + d*` can overflow and panic in debug builds.
-        // We avoid that by:
-        // - clamping the approx indices to a safe i32 range
-        // - performing neighbor addition in i64, then clamping back to i32
-        let approx_y_f = ((world.y - origin.y - r) / v_step).round();
-        let approx_x_f = ((world.x - origin.x - (w / 2.0)) / w).round();
-
-        // Clamp before casting to prevent UB-ish surprises and overflow on later additions.
+        // Approximate the row from screen Y (good enough to narrow search).
+        let approx_y_f = ((cursor_screen.y - origin.y - r) / v_step).round();
         let approx_y = approx_y_f.clamp(i32::MIN as f32, i32::MAX as f32) as i32;
+
+        // Approximate the col from screen X. Since odd/even rows have different offsets,
+        // we estimate using an even-row formula, then search neighbors.
+        let approx_x_f = ((cursor_screen.x - origin.x - (w / 2.0)) / w).round();
         let approx_x = approx_x_f.clamp(i32::MIN as f32, i32::MAX as f32) as i32;
 
         let mut best: Option<(SelectedHex, f32)> = None;
@@ -233,7 +235,6 @@ impl HexGridCanvas {
                 let y64 = (approx_y as i64) + dy;
                 let x64 = (approx_x as i64) + dx;
 
-                // Clamp into i32 so later math stays consistent.
                 let y = y64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                 let x = x64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
 
@@ -245,7 +246,10 @@ impl HexGridCanvas {
                 let cx = origin.x + (x as f32) * w + row_offset + (w / 2.0);
                 let cy = origin.y + (y as f32) * v_step + r;
 
-                let d2 = (world.x - cx) * (world.x - cx) + (world.y - cy) * (world.y - cy);
+                let dx = cursor_screen.x - cx;
+                let dy = cursor_screen.y - cy;
+                let d2 = dx * dx + dy * dy;
+
                 if best.map(|(_, b)| d2 < b).unwrap_or(true) {
                     best = Some((SelectedHex { x, y }, d2));
                 }
