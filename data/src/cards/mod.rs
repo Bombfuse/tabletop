@@ -8,6 +8,7 @@ pub mod attack;
 pub mod interaction;
 pub mod item;
 pub mod level;
+pub mod stat_modifier;
 pub mod unit;
 
 #[cfg(test)]

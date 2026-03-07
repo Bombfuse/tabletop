@@ -40,10 +40,52 @@ fn damage_type_choices() -> Vec<DamageTypeChoice> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct StatChoice(String);
+
+impl std::fmt::Display for StatChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn stat_choices() -> Vec<StatChoice> {
+    vec![
+        StatChoice("Strength".to_string()),
+        StatChoice("Focus".to_string()),
+        StatChoice("Intelligence".to_string()),
+        StatChoice("Knowledge".to_string()),
+        StatChoice("Agility".to_string()),
+    ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OperatorChoice(String);
+
+impl std::fmt::Display for OperatorChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn operator_choices() -> Vec<OperatorChoice> {
+    vec![
+        OperatorChoice("Add".to_string()),
+        OperatorChoice("Subtract".to_string()),
+    ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingArmorModifierRow {
     pub value: i64,
     pub suit: String,
     pub damage_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingStatModifierRow {
+    pub stat: String,
+    pub value: i64,
+    pub operator: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +202,67 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         );
     }
 
+    let pending_stat: Vec<PendingStatModifierRow> = app
+        .pending_stat_modifiers
+        .iter()
+        .map(|sm| PendingStatModifierRow {
+            stat: sm.stat.as_str().to_string(),
+            value: sm.value,
+            operator: sm.operator.as_str().to_string(),
+        })
+        .collect();
+
+    let mut pending_stat_col = column![
+        text(format!(
+            "Pending stat modifiers ({} queued)",
+            pending_stat.len()
+        ))
+        .size(12)
+    ]
+    .spacing(6);
+
+    if pending_stat.is_empty() {
+        pending_stat_col = pending_stat_col.push(text("(none)").size(12));
+    } else {
+        for (idx, p) in pending_stat.iter().enumerate() {
+            pending_stat_col = pending_stat_col.push(
+                row![
+                    text(format!("{} {} {}", p.operator, p.value, p.stat)).size(12),
+                    iced::widget::Space::with_width(Length::Fill),
+                    button("Remove").on_press(Message::RemovePendingStatModifier(idx)),
+                ]
+                .spacing(12)
+                .align_items(Alignment::Center),
+            );
+        }
+
+        pending_stat_col = pending_stat_col.push(
+            row![
+                button("Clear queued").on_press(Message::ClearPendingStatModifiers),
+                iced::widget::Space::with_width(Length::Fill),
+            ]
+            .spacing(12),
+        );
+    }
+
+    let selected_stat = {
+        let trimmed = app.stat_modifier_stat.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(StatChoice(trimmed.to_string()))
+        }
+    };
+
+    let selected_operator = {
+        let trimmed = app.stat_modifier_operator.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(OperatorChoice(trimmed.to_string()))
+        }
+    };
+
     let form = column![
         text("Create Level").size(18),
         row![
@@ -176,6 +279,43 @@ pub fn view(app: &ToolsGui) -> Element<'_, Message> {
         add_assoc_row,
         add_assoc_filter_row,
         row![button("Create").on_press(Message::CreateLevelAndMaybeAssociate)].spacing(12),
+        horizontal_rule(1),
+        text("Optional Stat Modifiers").size(16),
+        row![
+            column![
+                text("Stat").size(12),
+                pick_list(stat_choices(), selected_stat, |c: StatChoice| {
+                    Message::StatModifierStatChanged(c.0)
+                })
+                .placeholder("Select...")
+                .width(Length::Fixed(220.0)),
+            ]
+            .spacing(4),
+            column![
+                text("Operator").size(12),
+                pick_list(
+                    operator_choices(),
+                    selected_operator,
+                    |c: OperatorChoice| Message::StatModifierOperatorChanged(c.0)
+                )
+                .placeholder("Select...")
+                .width(Length::Fixed(220.0)),
+            ]
+            .spacing(4),
+            column![
+                text("Value").size(12),
+                text_input("Value", &app.stat_modifier_value)
+                    .on_input(Message::StatModifierValueChanged)
+                    .padding(8)
+                    .width(Length::Fixed(220.0)),
+            ]
+            .spacing(4),
+            button("Queue Stat Modifier").on_press(Message::AddPendingStatModifier),
+            iced::widget::Space::with_width(Length::Fill),
+        ]
+        .spacing(12)
+        .align_items(Alignment::End),
+        pending_stat_col,
         horizontal_rule(1),
         text("Optional Armor Modifiers").size(16),
         row![
@@ -331,6 +471,126 @@ pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, M
         armor_mods_col = armor_mods_col.push(text("(none)").size(12));
     }
 
+    // List stat modifiers associated with this level.
+    let mut stat_mods_col = column![text("Stat Modifiers").size(16)].spacing(8);
+    let mut any_stat_mods = false;
+
+    for sm in &app.stat_modifiers {
+        if sm.level_name.as_deref() == Some(original_name) {
+            any_stat_mods = true;
+            stat_mods_col = stat_mods_col.push(
+                row![
+                    text(format!(
+                        "id={} {} {} {}",
+                        sm.id, sm.operator, sm.value, sm.stat
+                    ))
+                    .size(12),
+                    iced::widget::Space::with_width(Length::Fill),
+                    button("Delete").on_press(Message::DeleteStatModifier(sm.id)),
+                ]
+                .spacing(12)
+                .align_items(Alignment::Center),
+            );
+        }
+    }
+
+    if !any_stat_mods {
+        stat_mods_col = stat_mods_col.push(text("(none)").size(12));
+    }
+
+    // Add stat modifier form (uses shared GUI buffers on `ToolsGui`).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct StatChoice(String);
+
+    impl std::fmt::Display for StatChoice {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    fn stat_choices() -> Vec<StatChoice> {
+        vec![
+            StatChoice("Strength".to_string()),
+            StatChoice("Focus".to_string()),
+            StatChoice("Intelligence".to_string()),
+            StatChoice("Knowledge".to_string()),
+            StatChoice("Agility".to_string()),
+        ]
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct OperatorChoice(String);
+
+    impl std::fmt::Display for OperatorChoice {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    fn operator_choices() -> Vec<OperatorChoice> {
+        vec![
+            OperatorChoice("Add".to_string()),
+            OperatorChoice("Subtract".to_string()),
+        ]
+    }
+
+    let selected_stat = {
+        let trimmed = app.stat_modifier_stat.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(StatChoice(trimmed.to_string()))
+        }
+    };
+
+    let selected_operator = {
+        let trimmed = app.stat_modifier_operator.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(OperatorChoice(trimmed.to_string()))
+        }
+    };
+
+    let add_stat_mod_form = column![
+        text("Add Stat Modifier").size(16),
+        row![
+            column![
+                text("Stat").size(12),
+                pick_list(stat_choices(), selected_stat, |c: StatChoice| {
+                    Message::StatModifierStatChanged(c.0)
+                })
+                .placeholder("Select...")
+                .width(Length::Fixed(220.0)),
+            ]
+            .spacing(4),
+            column![
+                text("Operator").size(12),
+                pick_list(
+                    operator_choices(),
+                    selected_operator,
+                    |c: OperatorChoice| Message::StatModifierOperatorChanged(c.0)
+                )
+                .placeholder("Select...")
+                .width(Length::Fixed(220.0)),
+            ]
+            .spacing(4),
+            column![
+                text("Value").size(12),
+                text_input("Value", &app.stat_modifier_value)
+                    .on_input(Message::StatModifierValueChanged)
+                    .padding(8)
+                    .width(Length::Fixed(220.0)),
+            ]
+            .spacing(4),
+            button("Add").on_press(Message::CreateLevelStatModifier),
+            iced::widget::Space::with_width(Length::Fill),
+        ]
+        .spacing(12)
+        .align_items(Alignment::End),
+    ]
+    .spacing(8);
+
     let form = column![
         add_assoc_row,
         add_assoc_filter_row,
@@ -347,6 +607,10 @@ pub fn edit_view<'a>(app: &'a ToolsGui, original_name: &'a str) -> Element<'a, M
         .spacing(12),
         horizontal_rule(1),
         armor_mods_col,
+        horizontal_rule(1),
+        stat_mods_col,
+        horizontal_rule(1),
+        add_stat_mod_form,
         horizontal_rule(1),
         text("Add Armor Modifier").size(16),
         row![

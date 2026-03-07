@@ -4,6 +4,7 @@ pub mod attack;
 pub mod interaction;
 pub mod item;
 pub mod level;
+pub mod stat_modifier;
 pub mod unit;
 
 // Test support (in-memory DB + schema) has been moved into the shared `data` crate.

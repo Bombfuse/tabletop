@@ -12,6 +12,33 @@ fn parse_optional_i64_from_input(label: &str, s: &str) -> anyhow::Result<Option<
     Ok(Some(v))
 }
 
+fn parse_stat_choice(s: &str) -> anyhow::Result<app::cards::stat_modifier::Stat> {
+    let t = s.trim();
+    match t {
+        "Strength" => Ok(app::cards::stat_modifier::Stat::Strength),
+        "Focus" => Ok(app::cards::stat_modifier::Stat::Focus),
+        "Intelligence" => Ok(app::cards::stat_modifier::Stat::Intelligence),
+        "Knowledge" => Ok(app::cards::stat_modifier::Stat::Knowledge),
+        "Agility" => Ok(app::cards::stat_modifier::Stat::Agility),
+        other => Err(anyhow::anyhow!(
+            "Stat must be one of Strength, Focus, Intelligence, Knowledge, Agility (got: {other})"
+        )),
+    }
+}
+
+fn parse_stat_operator_choice(
+    s: &str,
+) -> anyhow::Result<app::cards::stat_modifier::StatModifierOperator> {
+    let t = s.trim();
+    match t {
+        "Add" => Ok(app::cards::stat_modifier::StatModifierOperator::Add),
+        "Subtract" => Ok(app::cards::stat_modifier::StatModifierOperator::Subtract),
+        other => Err(anyhow::anyhow!(
+            "Operator must be Add or Subtract (got: {other})"
+        )),
+    }
+}
+
 pub fn normalize_for_match(s: &str) -> String {
     s.trim().to_lowercase()
 }
@@ -32,6 +59,13 @@ use iced::{Application, Command, Element, Length, Settings, Subscription, Theme}
 use rusqlite::OptionalExtension;
 
 use crate::app;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingStatModifierRow {
+    pub stat: String,
+    pub value: i64,
+    pub operator: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionAssociationKind {
@@ -91,7 +125,26 @@ pub enum Message {
     Tick,
     SwitchTab(Tab),
 
+    // Refresh data
     Refresh,
+
+    // Stat modifiers form buffers
+    StatModifierValueChanged(String),
+    StatModifierStatChanged(String),
+    StatModifierOperatorChanged(String),
+
+    // Queue stat modifiers during create flows (Item/Level)
+    AddPendingStatModifier,
+    RemovePendingStatModifier(usize),
+    ClearPendingStatModifiers,
+
+    // Create stat modifiers while editing cards
+    CreateUnitStatModifier,
+    CreateItemStatModifier,
+    CreateLevelStatModifier,
+
+    // Delete stat modifiers from card views
+    DeleteStatModifier(i64),
 
     // Hex grid editor
     HexGridWidthChanged(String),
@@ -99,17 +152,13 @@ pub enum Message {
     HexGridNameChanged(String),
     CreateNewHexGrid,
     SaveHexGrid,
-
-    // Hex grid list/load
     RefreshHexGrids,
     LoadHexGridById(i64),
     DeleteHexGridById(i64),
-
     HexGridApplyResize,
     HexGridTileClicked(i32, i32),
     HexGridTileClear(i32, i32),
 
-    // Hex tile associations (selected tile editor)
     HexTileUnitQueryChanged(String),
     HexTileItemQueryChanged(String),
     HexTileLevelQueryChanged(String),
@@ -119,37 +168,26 @@ pub enum Message {
     HexTilePickLevelByName(String),
 
     HexTileTypeChanged(String),
+
     SaveHexTileAssociations,
     ClearHexTileAssociations,
 
-    // Armor modifiers form (single "draft" row editor)
     ArmorModifierValueChanged(String),
     ArmorModifierSuitChanged(String),
     ArmorModifierDamageTypeChanged(String),
 
-    // Pending armor modifiers (used by create-card flows)
     AddPendingArmorModifier,
     RemovePendingArmorModifier(usize),
     ClearPendingArmorModifiers,
 
-    // Create an armor modifier in the context of the current view:
-    // - If editing an Item, it will be linked to that Item.
-    // - If editing a Level, it will be linked to that Level.
-    // - Otherwise, creation is rejected (prevents unassociated modifiers).
     CreateArmorModifier,
 
-    // De-link an armor modifier from its associated card (item/level).
-    // The armor modifier row remains, but the association link row is removed.
     RemoveArmorModifierLink(i64),
 
-    // Armor modifiers edit navigation
     EditArmorModifier(i64),
-
-    // Armor modifiers save/delete
     SaveArmorModifierEdits,
     DeleteArmorModifier(i64),
 
-    // Units form
     UnitNameChanged(String),
     UnitStrengthChanged(String),
     UnitFocusChanged(String),
@@ -158,16 +196,13 @@ pub enum Message {
     UnitKnowledgeChanged(String),
     CreateUnit,
 
-    // Items form
     ItemNameChanged(String),
     CreateItem,
 
-    // Levels form
     LevelNameChanged(String),
     LevelTextChanged(String),
     CreateLevel,
 
-    // Actions form
     ActionNameChanged(String),
     ActionPointCostChanged(String),
     ActionTypeChanged(String),
@@ -175,7 +210,6 @@ pub enum Message {
 
     CreateAction,
 
-    // Optional associations set from Unit/Item/Level views
     UnitAssocActionNameChanged(String),
     ItemAssocActionNameChanged(String),
     LevelAssocActionNameChanged(String),
@@ -189,41 +223,38 @@ pub enum Message {
     AddLevelAssociation,
     RemoveLevelAssociation(String),
 
-    // Create + associate in one step (from create forms)
     CreateUnitAndMaybeAssociate,
     CreateItemAndMaybeAssociate,
     CreateLevelAndMaybeAssociate,
 
-    // Attack subform (used for create + edit when ActionType = Attack)
     AttackDamageChanged(String),
     AttackDamageTypeChanged(String),
     AttackSkillChanged(String),
     AttackTargetChanged(String),
     AttackRangeChanged(String),
+
     SaveAttackEdits,
     DeleteAttack,
 
-    // Interaction subform (used for create + edit when ActionType = Interaction)
     InteractionRangeChanged(String),
     InteractionSkillChanged(String),
-    InteractionTargetChanged(String), // empty string => NULL
+    InteractionTargetChanged(String),
+
     SaveInteractionEdits,
     DeleteInteraction,
 
-    // Edit navigation
     EditUnit(String),
     EditItem(String),
     EditLevel(String),
     EditAction(String),
+
     CancelEdit,
 
-    // Save edits
     SaveUnitEdits,
     SaveItemEdits,
     SaveLevelEdits,
     SaveActionEdits,
 
-    // Delete actions
     DeleteUnit(String),
     DeleteItem(String),
     DeleteLevel(String),
@@ -276,6 +307,19 @@ pub struct ArmorModifierRow {
     pub damage_type: String,
 
     // Optional association (at most one should be Some at a time, or all None).
+    pub item_name: Option<String>,
+    pub level_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatModifierRow {
+    pub id: i64,
+    pub stat: String,
+    pub value: i64,
+    pub operator: String,
+
+    // Optional association (at most one should be Some at a time, or all None).
+    pub unit_name: Option<String>,
     pub item_name: Option<String>,
     pub level_name: Option<String>,
 }
@@ -334,6 +378,14 @@ pub struct ToolsGui {
     pub armor_modifier_suit: String,
     pub armor_modifier_damage_type: String,
 
+    // Stat modifiers form / edit buffer (single draft row)
+    pub stat_modifier_value: String,
+    pub stat_modifier_stat: String,
+    pub stat_modifier_operator: String,
+
+    // Pending stat modifiers (used by Item/Level create flows; linked on create)
+    pub pending_stat_modifiers: Vec<app::cards::stat_modifier::StatModifier>,
+
     // Hex grid editor (UI state only)
     pub hex_grid_width: String,
     pub hex_grid_height: String,
@@ -379,6 +431,7 @@ pub struct ToolsGui {
     pub levels: Vec<LevelRow>,
     pub actions: Vec<ActionRow>,
     pub armor_modifiers: Vec<ArmorModifierRow>,
+    pub stat_modifiers: Vec<StatModifierRow>,
 
     // ui state
     pub status: Option<String>,
@@ -444,6 +497,12 @@ impl Default for ToolsGui {
             armor_modifier_suit: "Spades".to_string(),
             armor_modifier_damage_type: "Physical".to_string(),
 
+            stat_modifier_value: "0".to_string(),
+            stat_modifier_stat: "Strength".to_string(),
+            stat_modifier_operator: "Add".to_string(),
+
+            pending_stat_modifiers: vec![],
+
             hex_grid_width: "9".to_string(),
             hex_grid_height: "9".to_string(),
 
@@ -486,6 +545,7 @@ impl Default for ToolsGui {
             levels: vec![],
             actions: vec![],
             armor_modifiers: vec![],
+            stat_modifiers: vec![],
 
             status: None,
             active_view: ActiveView::List,
@@ -533,6 +593,71 @@ impl Application for ToolsGui {
                 }
 
                 Command::none()
+            }
+
+            // Stat modifiers form buffers
+            Message::StatModifierValueChanged(v) => {
+                self.stat_modifier_value = v;
+                Command::none()
+            }
+            Message::StatModifierStatChanged(v) => {
+                self.stat_modifier_stat = v;
+                Command::none()
+            }
+            Message::StatModifierOperatorChanged(v) => {
+                self.stat_modifier_operator = v;
+                Command::none()
+            }
+
+            // Queue stat modifiers during create flows (Item/Level)
+            Message::AddPendingStatModifier => {
+                match self.create_stat_modifier_from_form() {
+                    Ok(sm) => self.pending_stat_modifiers.push(sm),
+                    Err(e) => self.status = Some(format!("{e:#}")),
+                }
+                Command::none()
+            }
+            Message::RemovePendingStatModifier(idx) => {
+                if idx < self.pending_stat_modifiers.len() {
+                    self.pending_stat_modifiers.remove(idx);
+                }
+                Command::none()
+            }
+            Message::ClearPendingStatModifiers => {
+                self.pending_stat_modifiers.clear();
+                Command::none()
+            }
+
+            // Create stat modifiers while editing cards
+            Message::CreateUnitStatModifier => {
+                if let Err(e) = self.create_stat_modifier_for_current_unit() {
+                    self.status = Some(format!("{e:#}"));
+                    return Command::none();
+                }
+                return Command::perform(async {}, |_| Message::Refresh);
+            }
+            Message::CreateItemStatModifier => {
+                if let Err(e) = self.create_stat_modifier_for_current_item() {
+                    self.status = Some(format!("{e:#}"));
+                    return Command::none();
+                }
+                return Command::perform(async {}, |_| Message::Refresh);
+            }
+            Message::CreateLevelStatModifier => {
+                if let Err(e) = self.create_stat_modifier_for_current_level() {
+                    self.status = Some(format!("{e:#}"));
+                    return Command::none();
+                }
+                return Command::perform(async {}, |_| Message::Refresh);
+            }
+
+            // Delete stat modifiers from card views
+            Message::DeleteStatModifier(id) => {
+                if let Err(e) = self.delete_stat_modifier(id) {
+                    self.status = Some(format!("{e:#}"));
+                    return Command::none();
+                }
+                return Command::perform(async {}, |_| Message::Refresh);
             }
 
             // Hex grid editor
@@ -1170,6 +1295,7 @@ impl Application for ToolsGui {
                     self.item_name.clear();
                     self.item_assoc_action_name.clear();
                     self.pending_armor_modifiers.clear();
+                    self.pending_stat_modifiers.clear();
                 }
                 Command::perform(async {}, |_| Message::Refresh)
             }
@@ -1226,6 +1352,7 @@ impl Application for ToolsGui {
                     self.level_text.clear();
                     self.level_assoc_action_name.clear();
                     self.pending_armor_modifiers.clear();
+                    self.pending_stat_modifiers.clear();
                 }
                 Command::perform(async {}, |_| Message::Refresh)
             }
@@ -1671,6 +1798,89 @@ impl ToolsGui {
         }
     }
 
+    fn list_stat_modifiers(&self, conn: &rusqlite::Connection) -> Result<Vec<StatModifierRow>> {
+        let rows = app::cards::stat_modifier::list_all(conn)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| StatModifierRow {
+                id: r.id,
+                stat: r.stat,
+                value: r.value,
+                operator: r.operator,
+                unit_name: r.unit_name,
+                item_name: r.item_name,
+                level_name: r.level_name,
+            })
+            .collect())
+    }
+
+    fn create_stat_modifier_from_form(&self) -> Result<app::cards::stat_modifier::StatModifier> {
+        let stat = parse_stat_choice(&self.stat_modifier_stat).with_context(
+            || "Stat is required (Strength, Focus, Intelligence, Knowledge, or Agility)",
+        )?;
+
+        let operator = parse_stat_operator_choice(&self.stat_modifier_operator)
+            .with_context(|| "Operator is required (Add or Subtract)")?;
+
+        let value = parse_optional_i64_from_input("Value", &self.stat_modifier_value)?
+            .ok_or_else(|| anyhow::anyhow!("Value must be a number"))?;
+
+        Ok(app::cards::stat_modifier::StatModifier {
+            stat,
+            value,
+            operator,
+        })
+    }
+
+    fn create_stat_modifier_for_current_unit(&mut self) -> Result<()> {
+        let original_name = match &self.active_view {
+            ActiveView::EditUnit { original_name } => original_name.clone(),
+            _ => return Err(anyhow::anyhow!("not editing a unit")),
+        };
+
+        let mut conn = self.open_conn()?;
+        let sm = self.create_stat_modifier_from_form()?;
+
+        app::cards::stat_modifier::create_and_link_to_unit_by_name(&mut conn, &sm, &original_name)?;
+        Ok(())
+    }
+
+    fn create_stat_modifier_for_current_item(&mut self) -> Result<()> {
+        let original_name = match &self.active_view {
+            ActiveView::EditItem { original_name } => original_name.clone(),
+            _ => return Err(anyhow::anyhow!("not editing an item")),
+        };
+
+        let mut conn = self.open_conn()?;
+        let sm = self.create_stat_modifier_from_form()?;
+
+        app::cards::stat_modifier::create_and_link_to_item_by_name(&mut conn, &sm, &original_name)?;
+        Ok(())
+    }
+
+    fn create_stat_modifier_for_current_level(&mut self) -> Result<()> {
+        let original_name = match &self.active_view {
+            ActiveView::EditLevel { original_name } => original_name.clone(),
+            _ => return Err(anyhow::anyhow!("not editing a level")),
+        };
+
+        let mut conn = self.open_conn()?;
+        let sm = self.create_stat_modifier_from_form()?;
+
+        app::cards::stat_modifier::create_and_link_to_level_by_name(
+            &mut conn,
+            &sm,
+            &original_name,
+        )?;
+        Ok(())
+    }
+
+    fn delete_stat_modifier(&mut self, id: i64) -> Result<()> {
+        let conn = self.open_conn()?;
+        app::cards::stat_modifier::delete_by_id(&conn, id)?;
+        Ok(())
+    }
+
     fn begin_edit_armor_modifier(&mut self, id: i64) -> Result<()> {
         let conn = self.open_conn()?;
 
@@ -1798,6 +2008,9 @@ impl ToolsGui {
         self.levels = views::levels::list_levels(&conn)?;
         self.actions = views::actions::list_actions(&conn)?;
         self.armor_modifiers = views::armor_modifiers::list_armor_modifiers(&conn)?;
+
+        // Stat modifiers are displayed within Unit/Item/Level edit views, so we keep them loaded.
+        self.stat_modifiers = self.list_stat_modifiers(&conn)?;
 
         Ok(())
     }
@@ -2136,6 +2349,13 @@ impl ToolsGui {
             )?;
         }
 
+        // Persist any queued stat modifiers now that the item exists.
+        for pending in &self.pending_stat_modifiers {
+            let _id = app::cards::stat_modifier::create_and_link_to_item_by_name(
+                &mut conn, pending, &item_name,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -2177,6 +2397,15 @@ impl ToolsGui {
         // CardId is derived from levels.id and the modifier is linked to this level.
         for pending in &self.pending_armor_modifiers {
             let _id = app::cards::armor_modifier::create_and_link_to_level_by_name(
+                &mut conn,
+                pending,
+                &level_name,
+            )?;
+        }
+
+        // Persist any queued stat modifiers now that the level exists.
+        for pending in &self.pending_stat_modifiers {
+            let _id = app::cards::stat_modifier::create_and_link_to_level_by_name(
                 &mut conn,
                 pending,
                 &level_name,
