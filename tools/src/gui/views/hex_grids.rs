@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Canvas, Event, Geometry, Path, Program, Stroke};
 use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, text_input};
@@ -168,6 +170,7 @@ fn hex_grid_canvas(gui: &ToolsGui) -> Element<'_, Message> {
         gui.hex_grid_selected_x,
         gui.hex_grid_selected_y,
         &gui.hex_grid_tiles_present,
+        &gui.hex_grid_tiles_with_data,
     );
 
     container(
@@ -362,6 +365,9 @@ struct HexGridProgram {
     /// Present tiles (x,y)
     present: std::collections::BTreeSet<(i32, i32)>,
 
+    /// Tiles that have any persisted data (unit/item/level association or tile type)
+    with_data: std::collections::BTreeSet<(i32, i32)>,
+
     cache: Cache,
 }
 
@@ -373,9 +379,9 @@ impl HexGridProgram {
         padding: f32,
         selected_x: Option<i32>,
         selected_y: Option<i32>,
-        tiles_present: &std::collections::BTreeSet<(i32, i32)>,
+        present: &BTreeSet<(i32, i32)>,
+        with_data: &BTreeSet<(i32, i32)>,
     ) -> Self {
-        let present = tiles_present.iter().copied().collect();
         Self {
             w,
             h,
@@ -383,7 +389,8 @@ impl HexGridProgram {
             padding,
             selected_x,
             selected_y,
-            present,
+            present: present.clone(),
+            with_data: with_data.clone(),
             cache: Cache::new(),
         }
     }
@@ -551,7 +558,12 @@ impl Program<Message> for HexGridProgram {
                 ..Stroke::default()
             };
 
+            // Base fill for any present tile
             let fill_present = Color::from_rgba(0.20, 0.45, 0.85, 0.35);
+
+            // Alternate fill for tiles that have any associations/data
+            let fill_with_data = Color::from_rgba(0.20, 0.75, 0.35, 0.38);
+
             let fill_selected = Color::from_rgba(0.95, 0.78, 0.20, 0.25);
 
             for y in 0..self.h {
@@ -559,9 +571,14 @@ impl Program<Message> for HexGridProgram {
                     let path = self.path_for(x, y);
                     let is_selected = self.selected_x == Some(x) && self.selected_y == Some(y);
                     let is_present = self.present.contains(&(x, y));
+                    let has_data = self.with_data.contains(&(x, y));
 
                     if is_present {
-                        frame.fill(&path, fill_present);
+                        if has_data {
+                            frame.fill(&path, fill_with_data);
+                        } else {
+                            frame.fill(&path, fill_present);
+                        }
                     }
 
                     if is_selected {

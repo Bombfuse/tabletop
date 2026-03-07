@@ -422,6 +422,10 @@ pub struct ToolsGui {
     // Tile presence only: coordinates that currently contain a tile
     pub hex_grid_tiles_present: BTreeSet<(i32, i32)>,
 
+    // Coordinates that have *any* persisted data/association (unit_id/item_id/level_id/type).
+    // Used by the canvas to render "occupied" tiles differently.
+    pub hex_grid_tiles_with_data: BTreeSet<(i32, i32)>,
+
     // Pending armor modifiers (used by create-card flows; linked on create)
     pub pending_armor_modifiers: Vec<app::cards::armor_modifier::ArmorModifier>,
 
@@ -537,6 +541,8 @@ impl Default for ToolsGui {
                 }
                 s
             })(),
+
+            hex_grid_tiles_with_data: BTreeSet::new(),
 
             pending_armor_modifiers: vec![],
 
@@ -690,6 +696,8 @@ impl Application for ToolsGui {
                     }
                 }
                 self.hex_grid_tiles_present = s;
+                // Data presence is persisted per-tile in DB; refresh it when a grid is loaded/saved.
+                self.hex_grid_tiles_with_data.clear();
 
                 // Clear selection buffers
                 self.hex_grid_selected_x = None;
@@ -794,6 +802,10 @@ impl Application for ToolsGui {
                     self.hex_grid_tiles_present
                         .retain(|(x, y)| *x >= 0 && *y >= 0 && *x < new_w && *y < new_h);
 
+                    // Keep "with data" set in-bounds too.
+                    self.hex_grid_tiles_with_data
+                        .retain(|(x, y)| *x >= 0 && *y >= 0 && *x < new_w && *y < new_h);
+
                     // Then, auto-populate tiles that are newly in-bounds due to the resize.
                     // This preserves deletions for tiles that were already in-bounds.
                     for y in 0..new_h {
@@ -876,6 +888,7 @@ impl Application for ToolsGui {
             Message::HexGridTileClear(x, y) => {
                 // Right-click deletes a tile from the grid (make this coordinate empty).
                 self.hex_grid_tiles_present.remove(&(x, y));
+                self.hex_grid_tiles_with_data.remove(&(x, y));
 
                 if self.hex_grid_selected_x == Some(x) && self.hex_grid_selected_y == Some(y) {
                     self.hex_grid_selected_x = None;
@@ -1094,6 +1107,18 @@ impl Application for ToolsGui {
                         self.hex_tile_unit_id = unit_id;
                         self.hex_tile_item_id = item_id;
                         self.hex_tile_level_id = level_id;
+
+                        // Track whether this tile now has any persisted association/data.
+                        let has_data = unit_id.is_some()
+                            || item_id.is_some()
+                            || level_id.is_some()
+                            || tile_type.is_some();
+
+                        if has_data {
+                            self.hex_grid_tiles_with_data.insert((x, y));
+                        } else {
+                            self.hex_grid_tiles_with_data.remove(&(x, y));
+                        }
 
                         self.status = Some("Hex tile associations saved".to_string());
                         Command::none()
@@ -2056,21 +2081,44 @@ impl ToolsGui {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
 
-        // Load tile presence
+        // Load tile presence + "has data" marker set
         let mut stmt = conn.prepare(
             r#"
-            SELECT x, y
+            SELECT
+                x,
+                y,
+                unit_id,
+                item_id,
+                level_id,
+                type
             FROM hex_tiles
             WHERE hex_grid_id = ?1
             "#,
         )?;
 
         let mut present: BTreeSet<(i32, i32)> = BTreeSet::new();
+        let mut with_data: BTreeSet<(i32, i32)> = BTreeSet::new();
+
         let mut rows = stmt.query(rusqlite::params![id])?;
         while let Some(r) = rows.next()? {
             let x: i32 = r.get(0)?;
             let y: i32 = r.get(1)?;
+
+            let unit_id: Option<i64> = r.get(2)?;
+            let item_id: Option<i64> = r.get(3)?;
+            let level_id: Option<i64> = r.get(4)?;
+            let tile_type: Option<String> = r.get(5)?;
+
             present.insert((x, y));
+
+            let has_data = unit_id.is_some()
+                || item_id.is_some()
+                || level_id.is_some()
+                || tile_type.as_deref().is_some_and(|t| !t.trim().is_empty());
+
+            if has_data {
+                with_data.insert((x, y));
+            }
         }
 
         // Update editor state
@@ -2079,6 +2127,7 @@ impl ToolsGui {
         self.hex_grid_width = width.to_string();
         self.hex_grid_height = height.to_string();
         self.hex_grid_tiles_present = present;
+        self.hex_grid_tiles_with_data = with_data;
 
         // Clear selection buffers
         self.hex_grid_selected_x = None;
