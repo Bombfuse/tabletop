@@ -915,14 +915,56 @@ impl Application for ToolsGui {
 
             Message::HexTileUnitQueryChanged(v) => {
                 self.hex_tile_unit_query = v;
+
+                // Enforce "only ONE of Unit/Item/Level/Type"
+                if !self.hex_tile_unit_query.trim().is_empty() {
+                    self.hex_tile_item_query.clear();
+                    self.hex_tile_level_query.clear();
+                    self.hex_tile_type.clear();
+
+                    self.hex_tile_item_id = None;
+                    self.hex_tile_level_id = None;
+
+                    self.hex_tile_item_name = None;
+                    self.hex_tile_level_name = None;
+                }
+
                 Command::none()
             }
             Message::HexTileItemQueryChanged(v) => {
                 self.hex_tile_item_query = v;
+
+                // Enforce "only ONE of Unit/Item/Level/Type"
+                if !self.hex_tile_item_query.trim().is_empty() {
+                    self.hex_tile_unit_query.clear();
+                    self.hex_tile_level_query.clear();
+                    self.hex_tile_type.clear();
+
+                    self.hex_tile_unit_id = None;
+                    self.hex_tile_level_id = None;
+
+                    self.hex_tile_unit_name = None;
+                    self.hex_tile_level_name = None;
+                }
+
                 Command::none()
             }
             Message::HexTileLevelQueryChanged(v) => {
                 self.hex_tile_level_query = v;
+
+                // Enforce "only ONE of Unit/Item/Level/Type"
+                if !self.hex_tile_level_query.trim().is_empty() {
+                    self.hex_tile_unit_query.clear();
+                    self.hex_tile_item_query.clear();
+                    self.hex_tile_type.clear();
+
+                    self.hex_tile_unit_id = None;
+                    self.hex_tile_item_id = None;
+
+                    self.hex_tile_unit_name = None;
+                    self.hex_tile_item_name = None;
+                }
+
                 Command::none()
             }
 
@@ -933,6 +975,17 @@ impl Application for ToolsGui {
                     .find(|u| u.name == name)
                     .map(|u| u.name.clone());
                 if let Some(picked) = picked {
+                    // Enforce "only ONE of Unit/Item/Level/Type"
+                    self.hex_tile_item_query.clear();
+                    self.hex_tile_level_query.clear();
+                    self.hex_tile_type.clear();
+
+                    self.hex_tile_item_id = None;
+                    self.hex_tile_level_id = None;
+
+                    self.hex_tile_item_name = None;
+                    self.hex_tile_level_name = None;
+
                     // NOTE: we resolve id at save time via DB lookup by name.
                     self.hex_tile_unit_name = Some(picked.clone());
                     self.hex_tile_unit_query = picked;
@@ -946,6 +999,17 @@ impl Application for ToolsGui {
                     .find(|i| i.name == name)
                     .map(|i| i.name.clone());
                 if let Some(picked) = picked {
+                    // Enforce "only ONE of Unit/Item/Level/Type"
+                    self.hex_tile_unit_query.clear();
+                    self.hex_tile_level_query.clear();
+                    self.hex_tile_type.clear();
+
+                    self.hex_tile_unit_id = None;
+                    self.hex_tile_level_id = None;
+
+                    self.hex_tile_unit_name = None;
+                    self.hex_tile_level_name = None;
+
                     self.hex_tile_item_name = Some(picked.clone());
                     self.hex_tile_item_query = picked;
                 }
@@ -958,6 +1022,17 @@ impl Application for ToolsGui {
                     .find(|l| l.name == name)
                     .map(|l| l.name.clone());
                 if let Some(picked) = picked {
+                    // Enforce "only ONE of Unit/Item/Level/Type"
+                    self.hex_tile_unit_query.clear();
+                    self.hex_tile_item_query.clear();
+                    self.hex_tile_type.clear();
+
+                    self.hex_tile_unit_id = None;
+                    self.hex_tile_item_id = None;
+
+                    self.hex_tile_unit_name = None;
+                    self.hex_tile_item_name = None;
+
                     self.hex_tile_level_name = Some(picked.clone());
                     self.hex_tile_level_query = picked;
                 }
@@ -966,6 +1041,22 @@ impl Application for ToolsGui {
 
             Message::HexTileTypeChanged(v) => {
                 self.hex_tile_type = v;
+
+                // Enforce "only ONE of Unit/Item/Level/Type"
+                if !self.hex_tile_type.trim().is_empty() {
+                    self.hex_tile_unit_query.clear();
+                    self.hex_tile_item_query.clear();
+                    self.hex_tile_level_query.clear();
+
+                    self.hex_tile_unit_id = None;
+                    self.hex_tile_item_id = None;
+                    self.hex_tile_level_id = None;
+
+                    self.hex_tile_unit_name = None;
+                    self.hex_tile_item_name = None;
+                    self.hex_tile_level_name = None;
+                }
+
                 Command::none()
             }
             Message::ClearHexTileAssociations => {
@@ -997,6 +1088,24 @@ impl Application for ToolsGui {
 
                 // Ensure tile exists (presence-only) before associating.
                 self.hex_grid_tiles_present.insert((x, y));
+
+                // Enforce "only ONE of Unit/Item/Level/Type"
+                let unit_input = !self.hex_tile_unit_query.trim().is_empty();
+                let item_input = !self.hex_tile_item_query.trim().is_empty();
+                let level_input = !self.hex_tile_level_query.trim().is_empty();
+                let type_input = !self.hex_tile_type.trim().is_empty();
+
+                let chosen_count = (unit_input as i32)
+                    + (item_input as i32)
+                    + (level_input as i32)
+                    + (type_input as i32);
+
+                if chosen_count > 1 {
+                    self.status = Some(
+                        "Choose only ONE association: Unit OR Level OR Item OR Type (clear the others first)".to_string(),
+                    );
+                    return Command::none();
+                }
 
                 let tile_type = {
                     let t = self.hex_tile_type.trim();
@@ -1066,6 +1175,18 @@ impl Application for ToolsGui {
                                 .unwrap_or(None)
                             }
                         };
+
+                        let resolved_count = (unit_id.is_some() as i32)
+                            + (item_id.is_some() as i32)
+                            + (level_id.is_some() as i32)
+                            + (tile_type.is_some() as i32);
+
+                        if resolved_count > 1 {
+                            self.status = Some(
+                                "Choose only ONE association: Unit OR Level OR Item OR Type (clear the others first)".to_string(),
+                            );
+                            return Command::none();
+                        }
 
                         // Ensure row exists
                         if let Err(e) = tx.execute(

@@ -216,64 +216,105 @@ fn selected_tile_editor(gui: &ToolsGui) -> Element<'_, Message> {
 
     let present = gui.hex_grid_tiles_present.contains(&(x, y));
 
-    // Autocomplete-like suggestions for Unit/Item/Level by name.
-    // This is implemented as:
-    // - a text_input for the query
-    // - a short list of matching buttons beneath it
-    // Clicking a suggestion "picks" that name (Message::HexTilePick*ByName).
+    // Classic autocomplete for Unit/Item/Level by name.
+    //
+    // UX:
+    // - user types in the text_input (freeform, used for save-time id resolution)
+    // - while typing, show a short list of "similar" card names (substring match, case-insensitive)
+    // - clicking a suggestion fills the input (Message::HexTilePick*ByName)
+    //
+    // "Similar" here means "contains the query as a substring" (case-insensitive). We also:
+    // - trim the query
+    // - only show suggestions when the query is non-empty
+    // - hide suggestions when the query exactly matches an existing card name
     let unit_query = gui.hex_tile_unit_query.trim();
     let item_query = gui.hex_tile_item_query.trim();
     let level_query = gui.hex_tile_level_query.trim();
 
-    let unit_suggestions: Vec<String> = gui
-        .units
-        .iter()
-        .filter(|u| crate::gui::contains_case_insensitive(&u.name, unit_query))
-        .take(8)
-        .map(|u| u.name.clone())
-        .collect();
+    let unit_query_non_empty = !unit_query.is_empty();
+    let item_query_non_empty = !item_query.is_empty();
+    let level_query_non_empty = !level_query.is_empty();
 
-    let item_suggestions: Vec<String> = gui
-        .items
-        .iter()
-        .filter(|i| crate::gui::contains_case_insensitive(&i.name, item_query))
-        .take(8)
-        .map(|i| i.name.clone())
-        .collect();
+    let unit_query_is_exact = gui.units.iter().any(|u| u.name == unit_query);
+    let item_query_is_exact = gui.items.iter().any(|i| i.name == item_query);
+    let level_query_is_exact = gui.levels.iter().any(|l| l.name == level_query);
 
-    let level_suggestions: Vec<String> = gui
-        .levels
-        .iter()
-        .filter(|l| crate::gui::contains_case_insensitive(&l.name, level_query))
-        .take(8)
-        .map(|l| l.name.clone())
-        .collect();
+    let unit_suggestions: Vec<String> = if unit_query_non_empty && !unit_query_is_exact {
+        gui.units
+            .iter()
+            .filter(|u| crate::gui::contains_case_insensitive(&u.name, unit_query))
+            .take(8)
+            .map(|u| u.name.clone())
+            .collect()
+    } else {
+        vec![]
+    };
+
+    let item_suggestions: Vec<String> = if item_query_non_empty && !item_query_is_exact {
+        gui.items
+            .iter()
+            .filter(|i| crate::gui::contains_case_insensitive(&i.name, item_query))
+            .take(8)
+            .map(|i| i.name.clone())
+            .collect()
+    } else {
+        vec![]
+    };
+
+    let level_suggestions: Vec<String> = if level_query_non_empty && !level_query_is_exact {
+        gui.levels
+            .iter()
+            .filter(|l| crate::gui::contains_case_insensitive(&l.name, level_query))
+            .take(8)
+            .map(|l| l.name.clone())
+            .collect()
+    } else {
+        vec![]
+    };
 
     let mut unit_suggestions_col = column![].spacing(6);
-    for name in unit_suggestions {
-        unit_suggestions_col = unit_suggestions_col.push(
-            button(text(name.clone()))
-                .padding(6)
-                .on_press(Message::HexTilePickUnitByName(name)),
-        );
+    if unit_query_non_empty && !unit_query_is_exact {
+        if unit_suggestions.is_empty() {
+            unit_suggestions_col = unit_suggestions_col.push(text("No matches").size(12));
+        } else {
+            for name in unit_suggestions {
+                unit_suggestions_col = unit_suggestions_col.push(
+                    button(text(name.clone()))
+                        .padding(6)
+                        .on_press(Message::HexTilePickUnitByName(name)),
+                );
+            }
+        }
     }
 
     let mut item_suggestions_col = column![].spacing(6);
-    for name in item_suggestions {
-        item_suggestions_col = item_suggestions_col.push(
-            button(text(name.clone()))
-                .padding(6)
-                .on_press(Message::HexTilePickItemByName(name)),
-        );
+    if item_query_non_empty && !item_query_is_exact {
+        if item_suggestions.is_empty() {
+            item_suggestions_col = item_suggestions_col.push(text("No matches").size(12));
+        } else {
+            for name in item_suggestions {
+                item_suggestions_col = item_suggestions_col.push(
+                    button(text(name.clone()))
+                        .padding(6)
+                        .on_press(Message::HexTilePickItemByName(name)),
+                );
+            }
+        }
     }
 
     let mut level_suggestions_col = column![].spacing(6);
-    for name in level_suggestions {
-        level_suggestions_col = level_suggestions_col.push(
-            button(text(name.clone()))
-                .padding(6)
-                .on_press(Message::HexTilePickLevelByName(name)),
-        );
+    if level_query_non_empty && !level_query_is_exact {
+        if level_suggestions.is_empty() {
+            level_suggestions_col = level_suggestions_col.push(text("No matches").size(12));
+        } else {
+            for name in level_suggestions {
+                level_suggestions_col = level_suggestions_col.push(
+                    button(text(name.clone()))
+                        .padding(6)
+                        .on_press(Message::HexTilePickLevelByName(name)),
+                );
+            }
+        }
     }
 
     let resolved_unit = gui
