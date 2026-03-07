@@ -5,5 +5,7 @@
 
 pub mod campaign_home;
 pub mod continue_campaign;
+pub mod load_scenario;
 pub mod main_menu;
+pub mod scenario_test;
 pub mod start_campaign;

@@ -9,7 +9,18 @@ pub enum Screen {
     MainMenu,
     CampaignSelectHero,
     CampaignContinueSelect,
-    CampaignHome { campaign_id: i64 },
+
+    /// Scenario loading flow: list available hex-grid maps from the core tabletop DB.
+    ScenarioSelectHexGrid,
+
+    /// Scenario test view: load + render a specific hex grid (by id) from the core DB.
+    ScenarioTest {
+        hex_grid_id: i64,
+    },
+
+    CampaignHome {
+        campaign_id: i64,
+    },
 }
 
 /// Messages emitted by UI views/pages and handled by the `iced::Application`.
@@ -17,6 +28,7 @@ pub enum Screen {
 pub enum Message {
     // Main menu actions
     StartCampaign,
+    LoadScenario,
     ContinueCampaign,
     ExitApp,
 
@@ -26,6 +38,12 @@ pub enum Message {
     // Start campaign flow
     SelectHero(String),
     BeginCampaign,
+
+    // Load scenario flow
+    /// Select a hex grid map by id (from the core tabletop DB list).
+    SelectScenarioHexGrid(i64),
+    /// Start the scenario using the selected hex grid map.
+    StartScenario,
 
     // Continue campaign flow
     SelectCampaign(i64),

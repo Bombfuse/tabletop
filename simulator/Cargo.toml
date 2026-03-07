@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 # UI framework
-iced = { version = "0.12", features = ["wgpu", "tokio"] }
+iced = { version = "0.12", features = ["wgpu", "tokio", "canvas"] }
 
 # Data access (SQLite + card APIs)
 data = { path = "../data" }

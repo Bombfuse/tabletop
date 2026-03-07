@@ -27,6 +27,17 @@ pub fn view(app: &Simulator) -> Element<'_, Message> {
             app.campaign_saved.as_deref(),
             app.load_error.as_deref(),
         ),
+        Screen::ScenarioSelectHexGrid => crate::pages::load_scenario::view(
+            &app.scenario_hex_grids,
+            app.selected_scenario_hex_grid_id,
+            app.load_error.as_deref(),
+        ),
+        Screen::ScenarioTest { hex_grid_id } => crate::pages::scenario_test::view(
+            hex_grid_id,
+            app.scenario_test_hex_grid.as_ref(),
+            &app.scenario_test_tiles,
+            app.load_error.as_deref(),
+        ),
         Screen::CampaignContinueSelect => {
             crate::pages::continue_campaign::view(&app.campaigns, app.load_error.as_deref())
         }

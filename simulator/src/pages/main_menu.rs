@@ -17,6 +17,11 @@ pub fn view() -> Element<'static, Message> {
         .width(Length::Fixed(260.0))
         .on_press(Message::StartCampaign);
 
+    let load_scenario = button(text("Load Scenario").size(24))
+        .padding(14)
+        .width(Length::Fixed(260.0))
+        .on_press(Message::LoadScenario);
+
     let cont = button(text("Continue Campaign").size(24))
         .padding(14)
         .width(Length::Fixed(260.0))
@@ -27,7 +32,7 @@ pub fn view() -> Element<'static, Message> {
         .width(Length::Fixed(260.0))
         .on_press(Message::ExitApp);
 
-    let content = column![title, start, cont, exit]
+    let content = column![title, start, load_scenario, cont, exit]
         .spacing(18)
         .align_items(iced::Alignment::Center)
         .width(Length::Fill);
